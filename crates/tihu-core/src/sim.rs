@@ -289,6 +289,16 @@ fn assign_unowned<A: Assigner>(
             (assigner.assign(&view, call), call)
         };
         let Some(car) = owner else { continue };
+        // 内核兜底：算法选中的车如果不服务这一层，换一台服务的。
+        // 再好的算法也可能漏掉这条约束，而漏掉的代价是那一层的人永远等不到车
+        let car = if w.car_serves(car, target.level) {
+            car
+        } else {
+            match w.serving_cars_least_busy(target.level).first() {
+                Some(&alt) => alt,
+                None => continue,
+            }
+        };
         if let Some(c) = w.calls.get_mut(target.id) {
             c.owner = Some(car);
         }
@@ -867,6 +877,12 @@ fn try_board_one<B: Boarding>(
     if !matching {
         return false;
     }
+    // 这趟车必须同时停靠出发层与目的层。少这一条，分区梯上的乘客会被
+    // 拉上车却到不了自己的楼层
+    let dest = w.pax[pid].to;
+    if !w.car_serves(id, lv) || !w.car_serves(id, dest) {
+        return false;
+    }
     let capacity_rated = w.cfg.cars[id].capacity_rated;
     let crush = w.cfg.boarding.capacity_crush(capacity_rated);
     let free = capacity_rated.saturating_sub(w.cars[id].occupants.len());
@@ -1242,5 +1258,106 @@ mod tests {
                 "预设 {name} 跑出来一个乘客都没有"
             );
         }
+    }
+
+    /// 单双层：奇数车停奇数层与主入口，偶数车停偶数层与主入口。
+    #[test]
+    fn odd_even_cars_split_the_floors() {
+        use crate::config::StopSpec;
+        let odd = StopSpec::parity(true);
+        assert!(odd.serves(crate::config::LOBBY), "单层车必须停主入口");
+        assert!(odd.serves(3));
+        assert!(!odd.serves(4));
+        assert!(odd.serves(-1), "地下层人人都停，不然车库那层没人去");
+        let even = StopSpec::parity(false);
+        assert!(even.serves(crate::config::LOBBY));
+        assert!(even.serves(4));
+        assert!(!even.serves(3));
+    }
+
+    /// 高低区与显式枚举。
+    #[test]
+    fn zone_and_list_specs() {
+        use crate::config::StopSpec;
+        let low = StopSpec::zone(1, 15);
+        assert!(low.serves(10));
+        assert!(!low.serves(20));
+        let picked = StopSpec::list([2, 7, 9]);
+        assert!(picked.serves(7));
+        assert!(!picked.serves(8));
+        let combo = StopSpec::union(vec![StopSpec::parity(true), StopSpec::zone(20, 22)]);
+        assert!(combo.serves(3));
+        assert!(combo.serves(21));
+        assert!(!combo.serves(4));
+    }
+
+    /// 分区梯：某一层没有车停靠时，配置校验要拦下来。
+    #[test]
+    fn unserved_floor_is_rejected() {
+        use crate::config::StopSpec;
+        let mut c = small();
+        c.cars = vec![CarSpec::default()];
+        c.cars[0].stops = StopSpec::zone(0, 3);
+        let v = c.validate();
+        assert!(!v.is_ok(), "4 到 6 层没人停，应当报错");
+        assert!(v.errors().any(|i| i.code == "unserved_floor"));
+    }
+
+    /// 分区梯漏掉主入口层时也要拦下来：那一层的住户去了主入口就回不来。
+    #[test]
+    fn zone_without_lobby_is_rejected() {
+        use crate::config::StopSpec;
+        let mut c = small();
+        c.cars = vec![CarSpec::default()];
+        c.cars[0].stops = StopSpec::zone(1, 6);
+        let v = c.validate();
+        assert!(
+            v.errors().any(|i| i.code == "no_through_car"),
+            "分区梯只停 1 到 6 层，不含主入口层，应当报错，实际 {:?}",
+            v.errors().map(|i| i.code).collect::<Vec<_>>()
+        );
+    }
+
+    /// 分区梯能正常服务：每台只在自己的楼层区间里收放人。
+    #[test]
+    fn split_zone_cars_serve_their_own_floors() {
+        use crate::config::StopSpec;
+        let mut c = Config::default();
+        c.building.floors = 20;
+        c.building.units_per_floor = vec![4; 20];
+        let mut lo = CarSpec::default();
+        lo.stops = StopSpec::zone(crate::config::LOBBY, 10);
+        let mut hi = CarSpec::default();
+        hi.stops = StopSpec::union(vec![
+            StopSpec::zone(11, 20),
+            StopSpec::list([crate::config::LOBBY]),
+        ]);
+        c.cars = vec![lo, hi];
+        c.traffic.departure_ratio = 1.0;
+        assert!(c.validate().is_ok(), "这份分区配置应当合法");
+        let r = default_run(c);
+        let served = r.metrics.pax_served + r.metrics.stair_users as u64;
+        assert_eq!(served, r.metrics.pax_total as u64, "分区梯下还有人没被送走");
+        // 每位乘客的出发层与目的层都必须被同一台车服务过
+        for p in &r.world.pax {
+            if p.t_exit <= 0.0 || p.used_stairs {
+                continue;
+            }
+            let ok = (0..r.world.cars.len())
+                .any(|i| r.world.car_serves(i, p.from) && r.world.car_serves(i, p.to));
+            assert!(ok, "出发层 {} 与目的层 {} 没有一台车同时服务", p.from, p.to);
+        }
+    }
+
+    /// 每台轿厢从配置的初始层起步。
+    #[test]
+    fn cars_start_where_configured() {
+        let mut c = small();
+        c.cars = vec![CarSpec::default(); 2];
+        c.cars[0].initial_level = 3;
+        c.cars[1].initial_level = 6;
+        let w = World::new(c);
+        assert_eq!(w.cars[0].level, 3.0);
+        assert_eq!(w.cars[1].level, 6.0);
     }
 }
