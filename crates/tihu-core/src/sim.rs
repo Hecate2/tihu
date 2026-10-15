@@ -1190,7 +1190,7 @@ mod tests {
 
     fn small() -> Config {
         let mut c = Config::default();
-        c.building.floors = 6;
+        c.building.top_level = 6;
         c.building.units_per_floor = vec![4; 6];
         c.cars = vec![CarSpec::default()];
         c
@@ -1273,7 +1273,7 @@ mod tests {
     #[test]
     fn fast_car_overshoots_a_call_it_cannot_brake_for() {
         let mut c = Config::default();
-        c.building.floors = 30;
+        c.building.top_level = 30;
         c.building.units_per_floor = vec![4; 30];
         // 用高速档，制动距离明显拉长
         let mut spec = CarSpec::default();
@@ -1380,12 +1380,17 @@ mod tests {
         use crate::config::StopSpec;
         let mut c = small();
         c.cars = vec![CarSpec::default()];
-        c.cars[0].stops = StopSpec::zone(1, 6);
+        // 只停 2 到 6 层，主入口层（层号 1）不在区间里
+        c.cars[0].stops = StopSpec::zone(2, 6);
         let v = c.validate();
         assert!(
             v.errors().any(|i| i.code == "no_through_car"),
-            "分区梯只停 1 到 6 层，不含主入口层，应当报错，实际 {:?}",
+            "分区梯不含主入口层，应当报错，实际 {:?}",
             v.errors().map(|i| i.code).collect::<Vec<_>>()
+        );
+        assert!(
+            v.errors().any(|i| i.code == "unserved_floor"),
+            "主入口层没人停，也该报错"
         );
     }
 
@@ -1394,7 +1399,7 @@ mod tests {
     fn split_zone_cars_serve_their_own_floors() {
         use crate::config::StopSpec;
         let mut c = Config::default();
-        c.building.floors = 20;
+        c.building.top_level = 20;
         c.building.units_per_floor = vec![4; 20];
         let mut lo = CarSpec::default();
         lo.stops = StopSpec::zone(crate::config::LOBBY, 10);
@@ -1405,6 +1410,8 @@ mod tests {
         ]);
         c.cars = vec![lo, hi];
         c.traffic.departure_ratio = 1.0;
+        // 窗口之外的收尾留够时间，免得把「仿真截断」当成「没人接」
+        c.sim.horizon_s = 7200.0;
         assert!(c.validate().is_ok(), "这份分区配置应当合法");
         let r = default_run(c);
         let served = r.metrics.pax_served + r.metrics.stair_users as u64;
@@ -1436,7 +1443,7 @@ mod tests {
     #[test]
     fn evening_peak_starts_from_the_lobby() {
         let mut c = Config::default();
-        c.building.floors = 18;
+        c.building.top_level = 18;
         c.building.units_per_floor = vec![6; 18];
         c.traffic.pattern = crate::config::Pattern::EveningUp;
         let w = World::new(c);
@@ -1461,7 +1468,7 @@ mod tests {
         let mut found_up = false;
         for seed in 0..30 {
             let mut c = Config::default();
-            c.building.floors = 12;
+            c.building.top_level = 12;
             c.building.units_per_floor = vec![6; 12];
             c.building.basement_levels = 2;
             c.cars = vec![CarSpec::default()];
@@ -1502,7 +1509,7 @@ mod tests {
     #[test]
     fn impatient_passengers_abandon_to_stairs() {
         let mut c = Config::default();
-        c.building.floors = 33;
+        c.building.top_level = 33;
         c.building.units_per_floor = vec![8; 33];
         c.cars = vec![CarSpec::default()]; // 一台车伺候六百多人，必然等很久
         c.stairs.abandon_after_s = 60.0;
@@ -1522,7 +1529,7 @@ mod tests {
     #[test]
     fn disabling_abandon_keeps_everyone_waiting() {
         let mut c = Config::default();
-        c.building.floors = 20;
+        c.building.top_level = 20;
         c.building.units_per_floor = vec![8; 20];
         c.cars = vec![CarSpec::default()];
         c.stairs.abandon_after_s = 0.0;

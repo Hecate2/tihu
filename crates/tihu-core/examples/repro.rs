@@ -6,8 +6,11 @@ fn main(){
         ("33层1梯4户", 33, 4, 2.8, 1),
     ] {
         let mut cfg = tihu_core::config::Config::default();
-        cfg.building.floors = floors as i16;
-        cfg.building.units_per_floor = vec![units; floors];
+        // 「N 层住宅」的顶层号是 N+1，层号 1 是主入口层
+        cfg.building.top_level = floors as i16 + 1;
+        let mut units = vec![units; floors + 1];
+        units[0] = 0;
+        cfg.building.units_per_floor = units;
         cfg.building.persons_per_unit = ppu;
         cfg.cars = vec![tihu_core::config::CarSpec::default(); cars];
         let t0 = std::time::Instant::now();

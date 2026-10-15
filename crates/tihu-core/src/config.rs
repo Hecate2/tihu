@@ -5,25 +5,29 @@
 
 use crate::motion::{DoorTiming, MotionProfile};
 
-/// 楼层编号约定。一层大堂是 0，住宅从 1 开始，地下是负数。
-pub const LOBBY: i16 = 0;
+/// 楼层编号约定。
+///
+/// **层号 1 是主入口层**，也就是住户进出大楼的那一层。住宅层从 2 开始往上排，
+/// 地下层用负数，B1 是 -1，B2 是 -2。层号 0 不存在。
+pub const LOBBY: i16 = 1;
 
 /// 一栋楼。
 #[derive(Debug, Clone)]
 pub struct Building {
-    /// 住宅层数，不含大堂
-    pub floors: i16,
+    /// 最高层号。层号 1 是主入口层，所以 19 表示上面还有 18 个住宅层
+    pub top_level: i16,
     /// 层高，米
     pub floor_height: f32,
-    /// 每层户数，长度必须等于 `floors`，第 0 项是第一层住宅
+    /// 逐层户数表，下标 = 层号 - 1，长度必须等于 `top_level`。
+    /// 下标 0 是主入口层那一层
     pub units_per_floor: Vec<u8>,
     /// 户均人数
     pub persons_per_unit: f32,
-    /// 地下层数，0 表示没有
+    /// 地下层数，0 表示没有。有几个就有 B1 到 B几
     pub basement_levels: i16,
     /// 每层套内面积，米²。给了才会做密度校验
     pub floor_area_m2: Option<f32>,
-    /// 第一层是否改成了架空层或商铺
+    /// 主入口层是否也住人。默认不住，只有大堂与门厅
     pub ground_floor_residential: bool,
     /// 顶层是否为跃层，户数减半
     pub top_floor_duplex: bool,
@@ -36,13 +40,18 @@ pub struct Building {
 impl Default for Building {
     fn default() -> Self {
         Self {
-            floors: 18,
+            // 顶层 19 号，加上主入口层，正好是「十八层住宅」
+            top_level: 19,
             floor_height: 3.0,
-            units_per_floor: vec![4; 18],
+            units_per_floor: {
+                let mut v = vec![4u8; 19];
+                v[0] = 0; // 主入口层不住人
+                v
+            },
             persons_per_unit: 2.8,
             basement_levels: 0,
             floor_area_m2: None,
-            ground_floor_residential: true,
+            ground_floor_residential: false,
             top_floor_duplex: false,
             min_unit_area_m2: 45.0, // TODO(calibration) 对照住宅设计规范条文
             min_area_per_person_m2: 20.0, // TODO(calibration)
@@ -51,21 +60,38 @@ impl Default for Building {
 }
 
 impl Building {
+    /// 全楼最低层号。有地下层时是 `-basement_levels`
+    pub fn lowest_level(&self) -> i16 {
+        -self.basement_levels.max(0)
+    }
+
+    /// 全楼最高层号
+    pub fn highest_level(&self) -> i16 {
+        self.top_level.max(LOBBY)
+    }
+
+    /// 全楼一共几个楼层格位
+    pub fn n_levels(&self) -> usize {
+        (self.highest_level() - self.lowest_level() + 1) as usize
+    }
+
     /// 某层实际有几户。
+    ///
+    /// 层号 1 是主入口层。地下层不住人。户数表可能还没补齐（校验阶段就会
+    /// 走到这里），越界一律按 0 户算。
     pub fn units_at(&self, level: i16) -> u8 {
-        if level < 1 || level > self.floors {
+        if level < LOBBY || level > self.highest_level() {
             return 0;
         }
-        // 户数表可能还没补齐（校验阶段就会走到这里），越界一律按 0 户算
         let mut n = self
             .units_per_floor
             .get((level - 1) as usize)
             .copied()
             .unwrap_or(0);
-        if self.top_floor_duplex && level == self.floors {
+        if n > 0 && self.top_floor_duplex && level == self.highest_level() {
             n = (n / 2).max(1);
         }
-        if !self.ground_floor_residential && level == 1 {
+        if n > 0 && !self.ground_floor_residential && level == LOBBY {
             n = 0;
         }
         n
@@ -78,12 +104,12 @@ impl Building {
 
     /// 全楼住户总数。
     pub fn total_residents(&self) -> usize {
-        (1..=self.floors).map(|f| self.residents_at(f)).sum()
+        (LOBBY..=self.highest_level()).map(|f| self.residents_at(f)).sum()
     }
 
     /// 最高住宅层的绝对高度，米。
     pub fn roof_height(&self) -> f64 {
-        self.floors as f64 * self.floor_height as f64
+        self.top_level as f64 * self.floor_height as f64
     }
 
     /// 某个楼层的绝对高度，米。地下层往下算。
@@ -678,10 +704,14 @@ impl Config {
         let mut v = Validation::default();
         let b = &self.building;
 
-        if b.floors < 1 || b.floors > 80 {
+        // 层号 1 是主入口层，所以顶层号至少要是 2
+        if b.top_level < 2 || b.top_level > 81 {
             v.issues.push(Issue::error(
                 "floors_range",
-                format!("住宅层数应在 1 到 80 之间，当前 {}", b.floors),
+                format!(
+                    "最高层号应在 2 到 81 之间（层号 1 是主入口层），当前 {}",
+                    b.top_level
+                ),
             ));
         }
         if b.floor_height < 2.4 || b.floor_height > 6.0 {
@@ -706,14 +736,14 @@ impl Config {
             ));
         }
 
-        // 户数表长度必须与层数一致
-        if b.units_per_floor.len() != b.floors as usize {
+        // 户数表长度必须与最高层号一致。层号 1 是主入口层，也占一格
+        if b.units_per_floor.len() != b.top_level as usize {
             v.issues.push(Issue::error(
                 "units_length",
                 format!(
-                    "每层户数表的长度是 {}，住宅层数是 {}，两者必须一致",
+                    "逐层户数表的长度是 {}，最高层号是 {}，两者必须一致",
                     b.units_per_floor.len(),
-                    b.floors
+                    b.top_level
                 ),
             ));
         }
@@ -722,7 +752,7 @@ impl Config {
         if let Some(area) = b.floor_area_m2 {
             let max_units = (area / b.min_unit_area_m2).floor() as i32;
             let max_persons = (area / b.min_area_per_person_m2).floor() as i32;
-            for level in 1..=b.floors {
+            for level in 1..=b.top_level {
                 let idx = (level - 1) as usize;
                 let Some(&units) = b.units_per_floor.get(idx) else { continue };
                 let units = units as i32;
@@ -791,8 +821,12 @@ impl Config {
                 "物理极限人数不可能小于额定人数".into(),
             ));
         }
-        // 每一层都要有至少一台轿厢愿意停，否则那一层的人永远等不到车
-        for level in -b.basement_levels.max(0)..=b.floors {
+        // 每一层都要有至少一台轿厢愿意停，否则那一层的人永远等不到车。
+        // 层号 0 不存在，跳过
+        for level in b.lowest_level()..=b.highest_level() {
+            if level == 0 {
+                continue;
+            }
             if !self.cars.iter().any(|c| c.stops.serves(level)) {
                 v.issues.push(Issue {
                     severity: Severity::Error,
@@ -805,7 +839,7 @@ impl Config {
         // 有住户的楼层，还得有一台既停这一层又停主入口层的轿厢。
         // 早晚高峰的主体客流是「住宅层与主入口层之间」，分区梯漏掉主入口，
         // 那一层的住户就上不了车也下不去
-        for level in 1..=b.floors {
+        for level in LOBBY..=b.highest_level() {
             if b.residents_at(level) == 0 {
                 continue;
             }
@@ -829,14 +863,21 @@ impl Config {
 
     /// 把配置里明显不合理的值夹到合理范围。校验通过之后调用。
     pub fn sanitized(mut self) -> Self {
+        self.building.top_level = self.building.top_level.max(2);
         self.building.floor_height = self.building.floor_height.clamp(2.4, 6.0);
         self.building.persons_per_unit = self.building.persons_per_unit.clamp(1.0, 6.0);
-        if self.building.units_per_floor.len() != self.building.floors as usize {
-            let n = self.building.floors.max(1) as usize;
+        if self.building.units_per_floor.len() != self.building.top_level as usize {
+            let n = self.building.top_level.max(1) as usize;
             self.building.units_per_floor.resize(n, 4);
         }
         for u in &mut self.building.units_per_floor {
-            *u = (*u).clamp(1, 12);
+            *u = (*u).clamp(0, 12);
+        }
+        // 主入口层默认不住人，补表或夹取之后都要把这个约定恢复回来
+        if !self.building.ground_floor_residential {
+            if let Some(first) = self.building.units_per_floor.first_mut() {
+                *first = 0;
+            }
         }
         for c in &mut self.cars {
             c.up = c.up.sanitized();
@@ -845,7 +886,7 @@ impl Config {
             c.rated_load_kg = c.rated_load_kg.clamp(100.0, 5000.0);
             c.initial_level = c
                 .initial_level
-                .clamp(-self.building.basement_levels.max(0), self.building.floors.max(1));
+                .clamp(-self.building.basement_levels.max(0), self.building.top_level.max(1));
         }
         self
     }
@@ -857,41 +898,33 @@ impl Config {
 }
 
 /// 网页与命令行共用的预设。
+///
+/// 层号 1 是主入口层，所以「18 层住宅」的 `top_level` 是 19，
+/// 逐层户数表的第 0 项是主入口层，按约定不住人。
 pub fn preset(name: &str) -> Option<Config> {
     let mut c = Config::default();
+    let set = |c: &mut Config, residential: i16, units: u8, cars: usize| {
+        c.building.top_level = residential + 1;
+        let mut v = vec![units; (residential + 1) as usize];
+        v[0] = 0; // 主入口层不住人
+        c.building.units_per_floor = v;
+        c.cars = vec![CarSpec::default(); cars];
+    };
     match name {
-        "std_residential" => {
-            c.building.floors = 18;
-            c.building.units_per_floor = vec![4; 18];
-            c.cars = vec![CarSpec::default(); 2];
-        }
-        "std_tall" => {
-            c.building.floors = 33;
-            c.building.units_per_floor = vec![6; 33];
-            c.cars = vec![CarSpec::default(); 2];
-        }
-        "std_underserved" => {
-            c.building.floors = 33;
-            c.building.units_per_floor = vec![4; 33];
-            c.cars = vec![CarSpec::default(); 1];
-        }
+        "std_residential" => set(&mut c, 18, 4, 2),
+        "std_tall" => set(&mut c, 33, 6, 2),
+        "std_underserved" => set(&mut c, 33, 4, 1),
         "stress_gaming" => {
-            c.building.floors = 33;
-            c.building.units_per_floor = vec![6; 33];
-            c.cars = vec![CarSpec::default(); 2];
+            set(&mut c, 33, 6, 2);
             c.strategy = StrategyMix { honest: 0.7, press_both: 0.25, press_up_only: 0.05, multi_call: 0.0 };
         }
         "stress_stalled_car" => {
-            c.building.floors = 33;
-            c.building.units_per_floor = vec![8; 33];
-            c.cars = vec![CarSpec::default(); 1];
+            set(&mut c, 33, 8, 1);
             c.overload.enabled = true;
             c.boarding.crush_factor = 1.4;
         }
         "stress_mixed_traffic" => {
-            c.building.floors = 24;
-            c.building.units_per_floor = vec![5; 24];
-            c.cars = vec![CarSpec::default(); 3];
+            set(&mut c, 24, 5, 3);
             c.traffic.pattern = Pattern::NoonMixed;
             c.traffic.reverse_ratio = 0.5;
         }
@@ -926,7 +959,7 @@ mod tests {
     #[test]
     fn density_constraint_rejects_impossible_building() {
         let mut c = Config::default();
-        c.building.floors = 10;
+        c.building.top_level = 10;
         c.building.units_per_floor = vec![20; 10];
         c.building.persons_per_unit = 3.0;
         c.building.floor_area_m2 = Some(400.0);
@@ -942,8 +975,8 @@ mod tests {
     #[test]
     fn density_warning_when_tight() {
         let mut c = Config::default();
-        c.building.floors = 4;
-        c.building.units_per_floor = vec![6; 4];
+        c.building.top_level = 4;
+        c.building.units_per_floor = vec![0, 6, 6, 6];
         c.building.persons_per_unit = 2.0;
         // 6 户 2 人 = 12 人。人均 1200/12 = 100 m²，很宽松，不该告警
         c.building.floor_area_m2 = Some(1200.0);
@@ -962,7 +995,7 @@ mod tests {
     #[test]
     fn units_table_length_must_match_floors() {
         let mut c = Config::default();
-        c.building.floors = 10;
+        c.building.top_level = 10;
         c.building.units_per_floor = vec![4; 5];
         let v = c.validate();
         assert!(!v.is_ok());
@@ -978,7 +1011,7 @@ mod tests {
     #[test]
     fn sanitize_fills_units_table() {
         let mut c = Config::default();
-        c.building.floors = 12;
+        c.building.top_level = 12;
         c.building.units_per_floor = vec![3; 4];
         let c = c.sanitized();
         assert_eq!(c.building.units_per_floor.len(), 12);
@@ -988,18 +1021,32 @@ mod tests {
     #[test]
     fn residents_follow_units_and_density() {
         let mut b = Building::default();
-        b.floors = 3;
+        b.top_level = 3;
+        b.ground_floor_residential = true;
         b.units_per_floor = vec![4, 4, 4];
         b.persons_per_unit = 2.5;
-        assert_eq!(b.residents_at(1), 10);
-        assert_eq!(b.residents_at(0), 0, "大堂不算住宅");
+        assert_eq!(b.residents_at(1), 10, "层号 1 是主入口层，设了住户就算住户");
+        assert_eq!(b.residents_at(0), 0, "层号 0 不存在");
+        assert_eq!(b.residents_at(4), 0, "超过最高层号就没有住户");
         assert_eq!(b.total_residents(), 30);
+    }
+
+    /// 主入口层默认不住人。
+    #[test]
+    fn ground_floor_has_no_residents_by_default() {
+        let mut c = Config::default();
+        c.building.top_level = 10;
+        c.building.units_per_floor = vec![4; 10];
+        let c = c.sanitized();
+        assert_eq!(c.building.residents_at(1), 0, "主入口层不该有住户");
+        assert!(c.building.residents_at(2) > 0, "二层起才是住宅");
     }
 
     #[test]
     fn duplex_top_floor_halves_units() {
         let mut b = Building::default();
-        b.floors = 3;
+        b.top_level = 3;
+        b.ground_floor_residential = true;
         b.units_per_floor = vec![4, 4, 4];
         b.top_floor_duplex = true;
         assert_eq!(b.units_at(3), 2);
@@ -1088,9 +1135,10 @@ mod tests {
     #[test]
     fn expected_trips_scales_with_population() {
         let c = preset("std_tall").unwrap();
-        // 每层 round(6 × 2.8) = 17 人，33 层共 561 人，乘 0.55 出行率
-        assert_eq!(c.building.residents_at(1), 17);
+        // 层号 1 是主入口层，不住人。住宅层是 2 到 34，每层 round(6 × 2.8) = 17 人
+        assert_eq!(c.building.residents_at(1), 0, "主入口层不住人");
+        assert_eq!(c.building.residents_at(2), 17);
         assert_eq!(c.building.total_residents(), 33 * 17);
-        assert_eq!(c.expected_trips(), (561.0 * 0.55) as usize);
+        assert_eq!(c.expected_trips(), (33.0 * 17.0 * 0.55) as usize);
     }
 }

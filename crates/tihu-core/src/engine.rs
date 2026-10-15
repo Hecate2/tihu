@@ -299,7 +299,7 @@ impl World {
     /// 之后不管换什么调度算法，楼里都是同一批人。这是公平比较的前提。
     pub fn new(cfg: Config) -> Self {
         let basement = cfg.building.basement_levels.max(0);
-        let top = cfg.building.floors;
+        let top = cfg.building.top_level;
         let n_levels = (top + basement + 1) as usize;
         let cfg = cfg.sanitized();
 
@@ -403,7 +403,7 @@ impl World {
         // 早高峰的主流是「住宅层到出口层」，晚高峰反过来。中午两向都有。
         // 出口层默认是主入口层，有一部分人下到地下车库。
         // 有一小撮人走反向，见 reverse_ratio。
-        for level in 1..=self.cfg.building.floors {
+        for level in 1..=self.cfg.building.top_level {
             let units = self.cfg.building.units_at(level);
             if units == 0 {
                 continue;
@@ -629,7 +629,7 @@ impl World {
 }
 
 fn n_slots_for(cfg: &Config) -> usize {
-    (cfg.building.floors + cfg.building.basement_levels.max(0) + 1) as usize * 2
+    (cfg.building.top_level + cfg.building.basement_levels.max(0) + 1) as usize * 2
 }
 
 /// 出门的人去哪一层。绝大多数去主入口层，少数直接下到地下车库。
@@ -764,7 +764,7 @@ fn estimate_wait(level: i16, cfg: &Config) -> f64 {
     // 一轮往返：上行接人加下行送人，各停一次
     let rtt = 2.0 * one_way + 2.0 * stops * per_stop;
     // 层越高越久
-    let height_factor = 1.0 + level.abs() as f64 / cfg.building.floors.max(1) as f64 * 0.4;
+    let height_factor = 1.0 + level.abs() as f64 / cfg.building.top_level.max(1) as f64 * 0.4;
     // 多几台梯能降低等待，但不是线性降低。用平方根，再封一个下限。
     let n_cars = cfg.cars.len().max(1) as f64;
     let relief = (n_cars.sqrt()).max(1.0);
@@ -821,7 +821,7 @@ mod tests {
         let cfg = Config::default();
         let s = &cfg.stairs;
         let mut prev = 1.0;
-        for level in 1..=cfg.building.floors {
+        for level in 1..=cfg.building.top_level {
             let est = estimate_wait(level, &cfg) + estimate_ride(level, &cfg);
             let p = s.probability(level, est);
             assert!(p <= prev + 1e-12, "第 {level} 层的概率不该比上一层更高");
