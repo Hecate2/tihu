@@ -89,10 +89,10 @@ pub struct RunView<'a> {
     pub capacity_crush: usize,
     /// 当前载重，公斤
     pub load_kg: f32,
-    /// 轿厢内登记的目的楼层，升序
-    pub car_calls: Vec<i16>,
-    /// 名下未服务的外呼
-    pub mine: Vec<HallCall>,
+    /// 轿厢内乘客的目的楼层，升序。借用内核的预分配缓冲，不分配
+    pub car_calls: &'a [i16],
+    /// 名下未服务的外呼。同上，借用不分配
+    pub mine: &'a [HallCall],
     /// 全机视图。持有值而不是引用，免得内联构造时出现临时借用
     pub system: SystemView<'a>,
     /// 层高，米
@@ -283,6 +283,13 @@ mod tests {
         static EMPTY_CARS: [CarBrief; 0] = [];
         static EMPTY_CALLS: [HallCall; 0] = [];
         static EMPTY_Q: [u32; 0] = [];
+        let mine: &'static [HallCall] = Box::leak(
+            vec![
+                HallCall { id: 0, level: high.unwrap_or(20), dir: Dir::Up, owner: Some(0), waiting: 2 },
+                HallCall { id: 1, level: low.unwrap_or(3), dir: Dir::Down, owner: Some(0), waiting: 5 },
+            ]
+            .into_boxed_slice(),
+        );
         RunView {
             now: 0.0,
             car: 0,
@@ -292,11 +299,8 @@ mod tests {
             capacity_rated: 13,
             capacity_crush: 17,
             load_kg: 512.0,
-            car_calls: Vec::new(),
-            mine: vec![
-                HallCall { id: 0, level: high.unwrap_or(20), dir: Dir::Up, owner: Some(0), waiting: 2 },
-                HallCall { id: 1, level: low.unwrap_or(3), dir: Dir::Down, owner: Some(0), waiting: 5 },
-            ],
+            car_calls: &[],
+            mine,
             system: SystemView {
                 now: 0.0,
                 cars: &EMPTY_CARS,
@@ -321,9 +325,31 @@ mod tests {
 
     #[test]
     fn empty_view_reports_no_work() {
-        let mut v = view(None, None);
-        v.mine.clear();
-        v.car_calls.clear();
+        static EMPTY_CARS: [CarBrief; 0] = [];
+        static EMPTY_CALLS: [HallCall; 0] = [];
+        static EMPTY_Q: [u32; 0] = [];
+        let v = RunView {
+            now: 0.0,
+            car: 0,
+            at_level: 10.0,
+            heading: Dir::Up,
+            load: 0,
+            capacity_rated: 13,
+            capacity_crush: 17,
+            load_kg: 0.0,
+            car_calls: &[],
+            mine: &[],
+            system: SystemView {
+                now: 0.0,
+                cars: &EMPTY_CARS,
+                pending: &EMPTY_CALLS,
+                all_calls: &EMPTY_CALLS,
+                queue_len: &EMPTY_Q,
+                top_level: 33,
+                n_cars: 0,
+            },
+            floor_height: 3.0,
+        };
         assert!(!v.has_work());
         assert_eq!(v.highest_pending(), None);
         assert_eq!(v.lowest_pending(), None);
