@@ -48,7 +48,7 @@
         <input type="number" id="basement" min="0" max="3" step="1" value="0">
       </div>
       <div class="check">
-        <input type="checkbox" id="gfr">
+        <input type="checkbox" id="gfr" checked>
         <label for="gfr">主入口层也住人</label>
       </div>
     </fieldset>
@@ -64,15 +64,11 @@
         <input type="number" id="load" min="400" max="1600" step="50" value="1000">
       </div>
       <div class="row">
-        <label for="speed">额定速度，米每秒</label>
-        <select id="speed">
-          <option value="1.00">1.0 低层住宅</option>
-          <option value="1.60">1.6 常见</option>
-          <option value="1.75" selected>1.75 住宅主流</option>
-          <option value="2.50">2.5 高层</option>
-          <option value="3.00">3.0 高速</option>
-        </select>
+        <label for="speed">额定速度，米每秒<span class="hint">可以填任意小数，点输入框看常见档位</span></label>
+        <input type="number" id="speed" min="0.3" max="20" step="0.01" value="1.75" list="speed_tiers">
       </div>
+      <datalist id="speed_tiers"></datalist>
+      <p class="hint note">常见档位 1.0、1.6、1.75、2.5、3.0 米每秒。写字楼的高速梯常在 4 到 6 米每秒，超高层有 10 米每秒以上的。加减速度按最接近的档位取。</p>
       <div class="row">
         <label for="stops">停靠区域<span class="hint">分区梯会改变谁挤得上</span></label>
         <select id="stops">
@@ -97,8 +93,8 @@
       <div class="row">
         <label for="dep">出行率<span class="hint">窗口内多大比例的人出门</span></label>
         <div class="range-wrap">
-          <input type="range" id="dep" min="0.05" max="1" step="0.05" value="0.55">
-          <span class="range-val" id="dep_v">55%</span>
+          <input type="range" id="dep" min="0.05" max="1" step="0.01" value="0.66">
+          <span class="range-val" id="dep_v">66%</span>
         </div>
       </div>
       <div class="row">
@@ -108,8 +104,8 @@
       <div class="row">
         <label for="ret">中途折返比例<span class="hint">出门后再回来的人</span></label>
         <div class="range-wrap">
-          <input type="range" id="ret" min="0" max="0.5" step="0.05" value="0.05">
-          <span class="range-val" id="ret_v">5%</span>
+          <input type="range" id="ret" min="0" max="0.2" step="0.005" value="0.005">
+          <span class="range-val" id="ret_v">0.5%</span>
         </div>
       </div>
     </fieldset>
@@ -136,8 +132,12 @@
     <fieldset>
       <legend>仿真</legend>
       <div class="row">
-        <label for="router">派梯算法</label>
+        <label for="router">走向算法<span class="hint">车开出去之后往哪走</span></label>
         <select id="router"></select>
+      </div>
+      <div class="algo">
+        <p class="hint note">新按下的一条外呼派给哪台轿厢，由内核的派梯规则统一负责，三种算法在这一层完全一样。这里选的是车开出去之后怎么走，选中哪条下面就会加粗。</p>
+        <ul id="router_list"></ul>
       </div>
       <div class="row">
         <label for="seed">随机种子<span class="hint">同种子结果完全一致</span></label>
@@ -163,7 +163,7 @@
       <div class="card">
         <div class="k">P90 等梯</div>
         <div class="v" id="v_p90">—<small>秒</small></div>
-        <div class="n">十个人里有一个人比这个还久</div>
+        <div class="n">10 个人里有 1 个人比这个还久</div>
       </div>
       <div class="card">
         <div class="k">被跳过的乘客</div>

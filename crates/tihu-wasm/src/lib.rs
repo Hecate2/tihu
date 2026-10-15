@@ -22,9 +22,20 @@ const ROUTERS: [&str; 3] = ["down_peak_sweep", "collective_scan", "selective_col
 
 /// 走向算法的中文说明。网页直接显示，不需要再维护第二份表。
 const ROUTER_LABELS: [&str; 3] = [
-    "早高峰定向扫楼（默认）",
-    "通用集选，全程扫楼",
-    "分区集选，各扫各的区",
+    "定向扫楼：先上到顶再一路下行",
+    "集选：沿一个方向走，沿途有人按就停",
+    "集选加满载直驶：载客率过 80% 就不再绕路",
+];
+
+/// 走向算法的一句话解释。网页在下拉框下面单独开一块显示。
+///
+/// 这里说的是**走向**，也就是车开出去之后往哪走。新按下的一条外呼分给哪台
+/// 轿厢由内核的派梯规则统一负责，三种算法在这一层完全一样，见
+/// `docs/DISPATCH_API.md`。名字不能混用，见 `AGENTS.md` 第 6 节的名词表。
+const ROUTER_DESCS: [&str; 3] = [
+    "先开到当前最高的那个呼叫层，再一路往下扫到最低。早高峰大家同时下楼时最省事，晚高峰要上楼的客流会被它绕远。",
+    "轿厢认准一个方向走，路上有同向的呼叫就停，走到头再掉头。任何时段都能用，是住宅楼的通用选择。",
+    "先用集选的走法，等车里载客率超过 80% 就只送车上的人，不再拐去接新外呼。它能挡住一部分没人上车的白停靠。",
 ];
 
 /// 取三位小数。报告只用于显示，多余的位数只是把 JSON 撑大。
@@ -286,12 +297,12 @@ pub fn presets_json() -> String {
 /// 预设的中文说明。只在网页的下拉框里出现。
 fn preset_label(name: &str) -> &'static str {
     match name {
-        "std_residential" => "十八层住宅，两梯四户",
-        "std_tall" => "三十三层住宅，两梯六户",
-        "std_underserved" => "三十三层住宅只有一台梯",
-        "stress_gaming" => "有人乱按键，两梯六户",
-        "stress_stalled_car" => "一台梯，超载死锁开着",
-        "stress_mixed_traffic" => "中午双向，三台梯",
+        "std_residential" => "18 层住宅，2 梯 4 户",
+        "std_tall" => "33 层住宅，2 梯 6 户",
+        "std_underserved" => "33 层住宅只有 1 台梯",
+        "stress_gaming" => "有人乱按键，2 梯 6 户",
+        "stress_stalled_car" => "1 台梯，超载死锁开着",
+        "stress_mixed_traffic" => "中午双向，3 台梯",
         "hospital" => "院楼，层间交通为主",
         _ => "预设",
     }
@@ -305,12 +316,22 @@ pub fn preset_config_json(name: &str) -> String {
     }
 }
 
-/// 走向算法的名字与中文说明，供网页下拉框使用。
+/// 走向算法的名字、短标签与一句话解释，供网页下拉框与说明区使用。
 pub fn routers_json() -> String {
     let list: Vec<serde_json::Value> = ROUTERS
         .iter()
         .zip(ROUTER_LABELS.iter())
-        .map(|(n, l)| serde_json::json!({ "name": n, "label": l }))
+        .zip(ROUTER_DESCS.iter())
+        .map(|((n, l), d)| serde_json::json!({ "name": n, "label": l, "desc": d }))
+        .collect();
+    serde_json::to_string(&list).unwrap_or_else(|_| "[]".to_string())
+}
+
+/// 常用速度档位，供网页在速度输入框下面给建议。
+pub fn speed_tiers_json() -> String {
+    let list: Vec<serde_json::Value> = tihu_core::motion::SPEED_TIERS
+        .iter()
+        .map(|t| serde_json::json!({ "v": t.0, "a": t.1, "j": t.2 }))
         .collect();
     serde_json::to_string(&list).unwrap_or_else(|_| "[]".to_string())
 }
@@ -423,9 +444,10 @@ pub unsafe extern "C" fn tihu_run(cfg_ptr: *const u8, cfg_len: usize, router_id:
     to_buf(report_json(&json, router))
 }
 
-/// 交出默认配置、某个预设、预设清单，或者算法清单。
+/// 交出默认配置、某个预设、预设清单、算法清单，或者速度档位表。
 ///
-/// `kind` 取值：0 默认配置，1 预设清单，2 算法清单，3 及以后是第 `kind - 3` 个预设。
+/// `kind` 取值：0 默认配置，1 预设清单，2 算法清单，100 速度档位表，
+/// 3 到 99 是第 `kind - 3` 个预设。100 留得靠后，以后加预设也不会撞上。
 #[no_mangle]
 pub extern "C" fn tihu_config(kind: u32) -> *mut u8 {
     let names = tihu_core::config::preset_names();
@@ -433,6 +455,7 @@ pub extern "C" fn tihu_config(kind: u32) -> *mut u8 {
         0 => default_config_json(),
         1 => presets_json(),
         2 => routers_json(),
+        100 => speed_tiers_json(),
         _ => {
             let i = (kind - 3) as usize;
             match names.get(i) {

@@ -71,14 +71,17 @@ const kernel = {
 // 界面控件 ↔ 配置 JSON 的翻译
 // ---------------------------------------------------------------------------
 
-// 速度档位的加速度与加加速度，与内核 motion::MotionProfile::preset 一致。
-const SPEEDS = {
-  "1.00": [0.5, 0.6],
-  "1.60": [0.65, 0.8],
-  "1.75": [0.8, 1.0],
-  "2.50": [1.0, 1.2],
-  "3.00": [1.0, 1.3],
-};
+// 常用速度档位，由内核给出：[额定速度, 加速度, 加加速度]。网页允许填任意小数
+// 速度，加减速度取最接近的那个档位，规则与内核 motion::MotionProfile::for_speed
+// 一致，两边不会有第二份表。
+let SPEED_TIERS = [];
+function profileFor(v) {
+  let best = SPEED_TIERS[0] || { a: 0.8, j: 1.0 };
+  for (const t of SPEED_TIERS) {
+    if (Math.abs(t.v - v) < Math.abs(best.v - v)) best = t;
+  }
+  return [best.a, best.j];
+}
 
 const ui = {};
 for (const id of [
@@ -142,12 +145,15 @@ function applyUi(cfg) {
 
   const n = num(ui.ncars);
   const load = num(ui.load);
-  const [a, j] = SPEEDS[ui.speed.value];
+  // 速度可以填任意小数。清了输入框或者填了怪值就退回 1.75，不让内核拿到 0。
+  const raw = Number(ui.speed.value);
+  const v = isFinite(raw) && raw > 0 ? raw : 1.75;
+  const [a, j] = profileFor(v);
   const car = {
     rated_load_kg: load,
     capacity_rated: Math.max(1, Math.round(load / 75)),
-    up: { v_max: Number(ui.speed.value), a_acc: a, a_dec: a, j_acc: j, j_dec: j },
-    down: { v_max: Number(ui.speed.value), a_acc: a, a_dec: a, j_acc: j, j_dec: j },
+    up: { v_max: v, a_acc: a, a_dec: a, j_acc: j, j_dec: j },
+    down: { v_max: v, a_acc: a, a_dec: a, j_acc: j, j_dec: j },
     initial_level: 1,
   };
   cfg.cars = [];
@@ -205,9 +211,7 @@ function loadIntoUi(cfg) {
 
   ui.ncars.value = cfg.cars.length;
   ui.load.value = cfg.cars[0].rated_load_kg;
-  const v = cfg.cars[0].up.v_max;
-  const key = Object.keys(SPEEDS).find((k) => Math.abs(Number(k) - v) < 0.01);
-  ui.speed.value = key || "1.75";
+  ui.speed.value = cfg.cars[0].up.v_max;
   ui.stops.value = cfg.cars.every((c) => c.stops === "all")
     ? "all"
     : cfg.cars[0].stops === "odd" || cfg.cars[0].stops === "even"
@@ -227,10 +231,25 @@ function loadIntoUi(cfg) {
   syncLabels();
 }
 
+// 百分比显示。0.5% 这种小比例不能被四舍五入成 1%，所以先收到一位小数。
+function pct(x) {
+  const v = Math.round(x * 1000) / 10;
+  return (Number.isInteger(v) ? v.toFixed(0) : v.toFixed(1)) + "%";
+}
+
 function syncLabels() {
-  document.getElementById("dep_v").textContent = Math.round(num(ui.dep) * 100) + "%";
-  document.getElementById("ret_v").textContent = Math.round(num(ui.ret) * 100) + "%";
-  document.getElementById("pressb_v").textContent = Math.round(num(ui.pressb) * 100) + "%";
+  document.getElementById("dep_v").textContent = pct(num(ui.dep));
+  document.getElementById("ret_v").textContent = pct(num(ui.ret));
+  document.getElementById("pressb_v").textContent = pct(num(ui.pressb));
+  markRouter();
+}
+
+// 走向算法的说明区。选中哪条就把哪条加粗，三条并排留着对照。
+function markRouter() {
+  const i = Number(ui.router.value) || 0;
+  document.querySelectorAll("#router_list li").forEach((el, k) => {
+    el.classList.toggle("on", k === i);
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -391,6 +410,15 @@ async function main() {
   const routers = kernel.config(2);
   ui.router.innerHTML = routers
     .map((r, i) => `<option value="${i}">${esc(r.label)}</option>`)
+    .join("");
+  document.getElementById("router_list").innerHTML = routers
+    .map((r) => `<li><b>${esc(r.label)}</b><span>${esc(r.desc)}</span></li>`)
+    .join("");
+
+  // 常用速度档位由内核给出，网页这边只负责摆进输入框的建议列表。
+  SPEED_TIERS = kernel.config(100);
+  document.getElementById("speed_tiers").innerHTML = SPEED_TIERS
+    .map((t) => `<option value="${t.v}">${t.v} 米每秒</option>`)
     .join("");
 
   ui.preset.addEventListener("change", () => {
