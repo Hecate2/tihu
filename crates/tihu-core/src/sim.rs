@@ -429,6 +429,25 @@ fn kill_call(w: &mut World, level: i16, dir: Dir) {
     }
 }
 
+/// 这一层这个方向此刻有几个人在等。派梯算法会读这个数。
+fn count_waiting(w: &World, level: i16, dir: Dir) -> usize {
+    if level < -w.basement || level > w.top {
+        return 0;
+    }
+    w.hall[w.qidx(level)]
+        .iter()
+        .filter(|&&p| {
+            let pax = &w.pax[p];
+            pax.waiting()
+                && match dir {
+                    Dir::Up => pax.to > level,
+                    Dir::Down => pax.to < level,
+                    Dir::None => true,
+                }
+        })
+        .count()
+}
+
 /// 登记外呼。红线 1 与红线 2 都在这个函数里。
 fn register_calls(w: &mut World, level: i16, newly: &[usize]) {
     if newly.is_empty() {
@@ -441,30 +460,36 @@ fn register_calls(w: &mut World, level: i16, newly: &[usize]) {
         match p.strategy {
             // 红线 1 的基线：只按自己真正想去的方向
             Strategy::Honest => {
-                w.calls.register(level, wanted, 1, false);
+                let n = count_waiting(w, level, wanted);
+                w.calls.register(level, wanted, n, false);
             }
             // 红线 2：上下都按。哪趟先来上哪趟
             Strategy::PressBoth => {
-                w.calls.register(level, Dir::Up, 1, false);
-                w.calls.register(level, Dir::Down, 1, false);
+                let up = count_waiting(w, level, Dir::Up);
+                let down = count_waiting(w, level, Dir::Down);
+                w.calls.register(level, Dir::Up, up, false);
+                w.calls.register(level, Dir::Down, down, false);
             }
             // 先按上行，跟车折返再下来
             Strategy::PressUpOnly => {
-                w.calls.register(level, Dir::Up, 1, false);
+                let n = count_waiting(w, level, Dir::Up);
+                w.calls.register(level, Dir::Up, n, false);
             }
             // 同时呼叫多台。只有独立面板才做得到
             Strategy::MultiCall => {
                 if per_car && !w.cars.is_empty() {
+                    let n = count_waiting(w, level, wanted);
                     let k = w.cars.len().min(2);
                     for t in 0..k {
-                        let (id, _) = w.calls.register(level, wanted, 1, false);
+                        let (id, _) = w.calls.register(level, wanted, n, false);
                         if let Some(c) = w.calls.get_mut(id) {
                             c.exclusive = true;
                             c.owner = Some(t);
                         }
                     }
                 } else {
-                    w.calls.register(level, wanted, 1, false);
+                    let n = count_waiting(w, level, wanted);
+                    w.calls.register(level, wanted, n, false);
                 }
             }
         }
@@ -741,9 +766,10 @@ fn advance_leg(w: &mut World, id: CarId) {
     let sign = if w.cars[id].dir == Dir::Up { 1 } else { -1 };
     let here = w.cars[id].level.round() as i16;
     let target = w.cars[id].leg_target;
-    let next = here + sign;
-    // 不越过目标
-    if (sign > 0 && next > target) || (sign < 0 && next < target) {
+    // 削到目标层为止。宁可早一层到，也不要越过去之后漏排事件
+    let raw = here + sign;
+    let next = if sign > 0 { raw.min(target) } else { raw.max(target) };
+    if next == here {
         return;
     }
     let spec = &w.cfg.cars[id];
