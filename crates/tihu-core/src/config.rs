@@ -29,7 +29,7 @@ pub struct Building {
     pub basement_levels: i16,
     /// 每层套内面积，米²。给了才会做密度校验
     pub floor_area_m2: Option<f32>,
-    /// 主入口层是否也住人。默认不住，只有大堂与门厅
+    /// 主入口层是否也住人。默认住人，关掉就变成纯大堂、架空层或者商铺
     pub ground_floor_residential: bool,
     /// 顶层是否为跃层，户数减半
     pub top_floor_duplex: bool,
@@ -42,18 +42,14 @@ pub struct Building {
 impl Default for Building {
     fn default() -> Self {
         Self {
-            // 顶层 19 号，加上主入口层，正好是「十八层住宅」
+            // 顶层 19 号，18 个住宅层上面再加一个会住人的主入口层
             top_level: 19,
             floor_height: 3.0,
-            units_per_floor: {
-                let mut v = vec![4u8; 19];
-                v[0] = 0; // 主入口层不住人
-                v
-            },
+            units_per_floor: vec![4u8; 19],
             persons_per_unit: 2.8,
             basement_levels: 0,
             floor_area_m2: None,
-            ground_floor_residential: false,
+            ground_floor_residential: true,
             top_floor_duplex: false,
             min_unit_area_m2: 45.0, // TODO(calibration) 对照住宅设计规范条文
             min_area_per_person_m2: 20.0, // TODO(calibration)
@@ -408,13 +404,13 @@ impl Default for Traffic {
         Self {
             pattern: Pattern::MorningDown,
             window_s: 3600.0,
-            departure_ratio: 0.55,
+            departure_ratio: 0.66,
             reverse_ratio: 0.08, // TODO(calibration)
             peak_alpha: 2.5,
             peak_beta: 2.5,
             party_window_s: 20.0,
             child_party_ratio: 0.35, // TODO(calibration) 早高峰要送小孩上学
-            return_ratio: 0.05,      // TODO(calibration) 折返拿东西、接送
+            return_ratio: 0.005,     // TODO(calibration) 折返拿东西、接送
             return_dwell_s: 900.0,   // TODO(calibration)
             flows: Vec::new(),
         }
@@ -1051,7 +1047,7 @@ impl Config {
         for u in &mut self.building.units_per_floor {
             *u = (*u).clamp(0, 12);
         }
-        // 主入口层默认不住人，补表或夹取之后都要把这个约定恢复回来
+        // 主入口层不住人时，补表或夹取之后都要把这个约定恢复回来
         if !self.building.ground_floor_residential {
             if let Some(first) = self.building.units_per_floor.first_mut() {
                 *first = 0;
@@ -1070,22 +1066,32 @@ impl Config {
     }
 
     /// 全楼住户乘出行率，估出的行程段数。
+    ///
+    /// 主入口层住的人出门抬脚就到，回家不用上楼，这段需求不经过电梯，
+    /// 所以从估算里扣掉，估算值才对得上实际生成的乘客数。
     pub fn expected_trips(&self) -> usize {
-        (self.building.total_residents() as f64 * self.traffic.departure_ratio as f64) as usize
+        let riders = self
+            .building
+            .total_residents()
+            .saturating_sub(self.building.residents_at(LOBBY));
+        (riders as f64 * self.traffic.departure_ratio as f64) as usize
     }
 }
 
 /// 网页与命令行共用的预设。
 ///
-/// 层号 1 是主入口层，所以「18 层住宅」的 `top_level` 是 19，
-/// 逐层户数表的第 0 项是主入口层，按约定不住人。
+/// 层号 1 是主入口层，所以「18 层住宅」的 `top_level` 是 19。预设楼盘的一层
+/// 一律当作纯大堂，不摆住户，`ground_floor_residential` 显式置为 `false`。
+/// 这与 `Config::default()` 的「主入口层住人」不同，理由在 `docs/MODEL.md`
+/// 第 2 节：预设要对应一个能报出住宅层数的具体楼盘。
 pub fn preset(name: &str) -> Option<Config> {
     let mut c = Config::default();
     let set = |c: &mut Config, residential: i16, units: u8, cars: usize| {
         c.building.top_level = residential + 1;
         let mut v = vec![units; (residential + 1) as usize];
-        v[0] = 0; // 主入口层不住人
+        v[0] = 0; // 预设的一层是纯大堂，不住人
         c.building.units_per_floor = v;
+        c.building.ground_floor_residential = false;
         c.cars = vec![CarSpec::default(); cars];
     };
     match name {
@@ -1223,14 +1229,24 @@ mod tests {
         assert_eq!(b.total_residents(), 30);
     }
 
-    /// 主入口层默认不住人。
+    /// 主入口层默认住人。
     #[test]
-    fn ground_floor_has_no_residents_by_default() {
+    fn ground_floor_is_residential_by_default() {
+        let c = Config::default();
+        assert!(c.building.ground_floor_residential, "主入口层默认住人");
+        assert!(c.building.residents_at(1) > 0, "默认配置里主入口层有住户");
+        assert!(c.building.residents_at(2) > 0);
+    }
+
+    /// 关掉开关之后，主入口层的住户要被清掉。
+    #[test]
+    fn toggling_ground_floor_off_clears_residents() {
         let mut c = Config::default();
         c.building.top_level = 10;
         c.building.units_per_floor = vec![4; 10];
+        c.building.ground_floor_residential = false;
         let c = c.sanitized();
-        assert_eq!(c.building.residents_at(1), 0, "主入口层不该有住户");
+        assert_eq!(c.building.residents_at(1), 0, "关掉之后主入口层不该有住户");
         assert!(c.building.residents_at(2) > 0, "二层起才是住宅");
     }
 
@@ -1331,7 +1347,7 @@ mod tests {
         assert_eq!(c.building.residents_at(1), 0, "主入口层不住人");
         assert_eq!(c.building.residents_at(2), 17);
         assert_eq!(c.building.total_residents(), 33 * 17);
-        assert_eq!(c.expected_trips(), (33.0 * 17.0 * 0.55) as usize);
+        assert_eq!(c.expected_trips(), (33.0 * 17.0 * 0.66) as usize);
     }
 
     /// 配置往返 JSON 必须一模一样。网页传的就是这份 JSON，

@@ -506,6 +506,12 @@ impl World {
         horizon: f64,
         rng: &mut crate::rng::Streams,
     ) {
+        // 出发层就是目的层的人不用电梯。主入口层住人的时候，他们早高峰出门
+        // 抬脚就到，晚高峰回家也不用上楼。生成零长度的行程只会往等待分布里
+        // 掺进一批 0 秒的假样本，把均值压低。
+        if from == to {
+            return;
+        }
         let stairs = &self.cfg.stairs;
         let dwell = rng.lognormal(self.cfg.traffic.return_dwell_s.max(1.0), 0.5).max(30.0);
         let patience = if stairs.enabled && stairs.abandon_after_s > 0.0 {
