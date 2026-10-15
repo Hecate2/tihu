@@ -1045,7 +1045,17 @@ fn try_board_one<B: Boarding>(
                 w.pax[pid].bypass_count += 1;
                 return false;
             }
-            // 物理极限。超出这个数再怎么挤也挤不进去
+            // 物理极限。两个上限取先到的那个。
+            //
+            // 千克上限管的是真装不下，人数上限管的是真挤不进去。乘客自己看不到
+            // 重量，他只知道自己是不是被夹住了，所以上面的心理判据一路按人数走，
+            // 这一步才看载重
+            let load_crush = w.cfg.boarding.load_crush_kg(w.cfg.cars[id].rated_load_kg as f64);
+            if w.cars[id].load_kg + w.pax[pid].weight > load_crush + 1e-9 {
+                w.pax[pid].no_space_count += 1;
+                w.pax[pid].bypass_count += 1;
+                return false;
+            }
             if w.cars[id].occupants.len() >= crush {
                 w.pax[pid].no_space_count += 1;
                 w.pax[pid].bypass_count += 1;
@@ -1107,13 +1117,8 @@ fn stall_tick(
             break;
         }
     }
-    if let Some((pos, pid)) = exited {
-        w.cars[id].occupants.remove(pos);
-        w.pax[pid].t_exit = w.now;
-        w.pax[pid].boarded_car = None;
-        w.pax[pid].requeued_after_stall = true;
-        let weight = w.pax[pid].weight;
-        w.cars[id].load_kg = (w.cars[id].load_kg - weight).max(0.0);
+    if let Some((_, pid)) = exited {
+        requeue_after_stall(w, id, pid, heap, seq);
     }
 
     let now_under = w.cars[id].load_kg <= trigger;
@@ -1122,12 +1127,7 @@ fn stall_tick(
         // 恢复了。强制退出时把最近上车的人请下去
         if !now_under {
             if let Some(&pid) = w.cars[id].occupants.last() {
-                w.cars[id].occupants.pop();
-                w.pax[pid].t_exit = w.now;
-                w.pax[pid].boarded_car = None;
-                w.pax[pid].requeued_after_stall = true;
-                let weight = w.pax[pid].weight;
-                w.cars[id].load_kg = (w.cars[id].load_kg - weight).max(0.0);
+                requeue_after_stall(w, id, pid, heap, seq);
             }
         }
         let seconds = w.now - w.cars[id].stall_since;
@@ -1140,6 +1140,48 @@ fn stall_tick(
     }
 
     StallOutcome { resumed: false, seconds: 0.0, stalls_here: 0 }
+}
+
+/// 把一位乘客从轿厢里请出来，让他重新排队。
+///
+/// **不能把他记成「已到达」。** 他只是被从轿厢里请了出来，一步都没往目的地走。
+/// 早先的实现直接写 `t_exit = now`，于是他的行程被算成完成，站到目的地却没到，
+/// 还会连带把等待时间的口径弄乱。
+///
+/// 僵局发生在乘客刚上车的那一层，所以他被请出来的地方就是他的出发点，
+/// 推回那一层的电梯厅就等于回到原处。到达时刻保持不变，等待继续累计，
+/// 见 `docs/MODEL.md` 第 8.3 节。
+fn requeue_after_stall(
+    w: &mut World,
+    id: CarId,
+    pid: usize,
+    heap: &mut std::collections::BinaryHeap<Ev>,
+    seq: &mut u64,
+) {
+    let floor = w.cars[id].level.round() as i16;
+    if floor < -w.basement || floor > w.top {
+        return;
+    }
+    w.cars[id].occupants.retain(|&p| p != pid);
+    let weight = w.pax[pid].weight;
+    w.cars[id].load_kg = (w.cars[id].load_kg - weight).max(0.0);
+    w.pax[pid].t_board = 0.0;
+    w.pax[pid].t_exit = 0.0;
+    w.pax[pid].boarded_car = None;
+    w.pax[pid].requeued_after_stall = true;
+    let patience = w.pax[pid].patience_s;
+    let qi = w.qidx(floor);
+    if !w.hall[qi].contains(&pid) {
+        w.hall[qi].push(pid);
+    }
+    // 重新进场，外呼会在那一刻重新登记
+    heap.push(Ev { at: w.now, seq: *seq, kind: Kind::Arrive(pid) });
+    *seq += 1;
+    // 重新给一个完整的耐心窗口，否则他会立刻触发已经过期的弃梯事件
+    if patience.is_finite() && patience > 0.0 {
+        heap.push(Ev { at: w.now + patience, seq: *seq, kind: Kind::Abandon(pid) });
+        *seq += 1;
+    }
 }
 
 /// 汇总指标。
@@ -1671,5 +1713,61 @@ mod tests {
         let r = run(c, &mut router, &mut assigner, &boarding);
         assert_eq!(r.metrics.pax_total, 0, "这一份配置不该有乘客");
         assert_eq!(r.world.cars[0].level, 5.0, "轿厢应当自己挪到第五层待命");
+    }
+
+    /// 被超载僵局请下车的乘客是重新排队，不是「已经到达」。
+    #[test]
+    fn stall_eviction_requeues_instead_of_completing_the_trip() {
+        let mut w = World::new(small());
+        let pid = 0;
+        let from = w.pax[pid].from;
+        // 把他放进车里，再模拟一次僵局把他请出来
+        w.cars[0].level = from as f32;
+        w.cars[0].occupants.push(pid);
+        w.cars[0].load_kg = w.pax[pid].weight;
+        w.pax[pid].boarded_car = Some(0);
+        w.pax[pid].t_board = 100.0;
+        let qi = w.qidx(from);
+        w.hall[qi].retain(|&p| p != pid);
+
+        let mut heap = std::collections::BinaryHeap::<Ev>::new();
+        let mut seq = 0u64;
+        requeue_after_stall(&mut w, 0, pid, &mut heap, &mut seq);
+
+        assert_eq!(w.pax[pid].t_exit, 0.0, "被请下车的人一步都没到目的地，不算到达");
+        assert_eq!(w.pax[pid].t_board, 0.0, "上梯记录要清掉，等待重新累计");
+        assert!(w.pax[pid].boarded_car.is_none());
+        assert!(w.pax[pid].requeued_after_stall);
+        assert!(w.hall[w.qidx(from)].contains(&pid), "要回到出发层的电梯厅排队");
+        assert!(!heap.is_empty(), "要排一次重新进场的事件，否则没人再管他");
+        assert_eq!(w.cars[0].occupants.len(), 0);
+        assert!(w.cars[0].load_kg.abs() < 1e-9, "载重要把这个人扣掉");
+    }
+
+    /// 座位还剩着，但重量已经到顶，这时物理上就是进不去了。
+    ///
+    /// 这一条把「装不下」与「不愿意挤」分开：前者记 no_space，后者记 declined。
+    #[test]
+    fn weight_limit_refuses_boarding_even_with_free_seats() {
+        let mut w = World::new(small());
+        let pid = 0;
+        let from = w.pax[pid].from;
+        let cap = w.cfg.boarding.load_crush_kg(w.cfg.cars[0].rated_load_kg as f64);
+        // 车停在出发点，已经压在载重上限上
+        w.cars[0].level = from as f32;
+        w.cars[0].load_kg = cap;
+        assert_eq!(w.cars[0].occupants.len(), 0, "座位还是空的");
+        assert!(
+            w.pax[pid].to != from && w.pax[pid].weight > 0.0,
+            "这位乘客有目的地也有重量"
+        );
+
+        let mut rng = Streams::new(7);
+        let boarding = DefaultBoarding::default();
+        let ok = try_board_one(&mut w, 0, from, pid, Dir::None, &boarding, 0.0, &mut rng);
+        assert!(!ok, "载重到顶就不该再放人进来");
+        assert_eq!(w.pax[pid].no_space_count, 1, "这是装不下，不是不愿意挤");
+        assert_eq!(w.pax[pid].declined_count, 0);
+        assert_eq!(w.cars[0].occupants.len(), 0);
     }
 }
