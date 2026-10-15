@@ -1,0 +1,207 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>梯户模拟器</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<header>
+  <h1>梯户模拟器</h1>
+  <p>拖几个滑块，算出这栋楼早高峰要等多久电梯。拖动即出结果，不需要联网，不需要服务器。</p>
+</header>
+
+<main>
+  <aside class="panel">
+    <h2>参数</h2>
+
+    <fieldset>
+      <legend>从预设起步</legend>
+      <div class="row">
+        <label for="preset">预设楼盘</label>
+        <select id="preset"></select>
+      </div>
+    </fieldset>
+
+    <fieldset>
+      <legend>楼栋</legend>
+      <div class="row">
+        <label for="res_floors">住宅层数<span class="hint">最高的那一层</span></label>
+        <input type="number" id="res_floors" min="1" max="60" step="1" value="18">
+      </div>
+      <div class="row">
+        <label for="units">每层户数</label>
+        <input type="number" id="units" min="1" max="12" step="1" value="4">
+      </div>
+      <div class="row">
+        <label for="ppu">户均人数</label>
+        <input type="number" id="ppu" min="1" max="6" step="0.1" value="2.8">
+      </div>
+      <div class="row">
+        <label for="fh">层高，米</label>
+        <input type="number" id="fh" min="2.4" max="6" step="0.1" value="3">
+      </div>
+      <div class="row">
+        <label for="basement">地下层数<span class="hint">B1、B2，可以下车库</span></label>
+        <input type="number" id="basement" min="0" max="3" step="1" value="0">
+      </div>
+      <div class="check">
+        <input type="checkbox" id="gfr">
+        <label for="gfr">主入口层也住人</label>
+      </div>
+    </fieldset>
+
+    <fieldset>
+      <legend>电梯</legend>
+      <div class="row">
+        <label for="ncars">台数</label>
+        <input type="number" id="ncars" min="1" max="6" step="1" value="2">
+      </div>
+      <div class="row">
+        <label for="load">额定载重，千克</label>
+        <input type="number" id="load" min="400" max="1600" step="50" value="1000">
+      </div>
+      <div class="row">
+        <label for="speed">额定速度，米每秒</label>
+        <select id="speed">
+          <option value="1.00">1.0 低层住宅</option>
+          <option value="1.60">1.6 常见</option>
+          <option value="1.75" selected>1.75 住宅主流</option>
+          <option value="2.50">2.5 高层</option>
+          <option value="3.00">3.0 高速</option>
+        </select>
+      </div>
+      <div class="row">
+        <label for="stops">停靠区域<span class="hint">分区梯会改变谁挤得上</span></label>
+        <select id="stops">
+          <option value="all" selected>每台都全停</option>
+          <option value="parity">单双层分开</option>
+          <option value="zones">高低区分开</option>
+        </select>
+      </div>
+    </fieldset>
+
+    <fieldset>
+      <legend>客流</legend>
+      <div class="row">
+        <label for="pattern">时段</label>
+        <select id="pattern">
+          <option value="morning_down" selected>早高峰，出门下楼</option>
+          <option value="evening_up">晚高峰，回家上楼</option>
+          <option value="noon_mixed">中午，双向都有</option>
+          <option value="inter_floor">层间交通，医院写字楼</option>
+        </select>
+      </div>
+      <div class="row">
+        <label for="dep">出行率<span class="hint">窗口内多大比例的人出门</span></label>
+        <div class="range-wrap">
+          <input type="range" id="dep" min="0.05" max="1" step="0.05" value="0.55">
+          <span class="range-val" id="dep_v">55%</span>
+        </div>
+      </div>
+      <div class="row">
+        <label for="window">高峰窗口，分钟</label>
+        <input type="number" id="window" min="10" max="180" step="5" value="60">
+      </div>
+      <div class="row">
+        <label for="ret">中途折返比例<span class="hint">出门后再回来的人</span></label>
+        <div class="range-wrap">
+          <input type="range" id="ret" min="0" max="0.5" step="0.05" value="0.05">
+          <span class="range-val" id="ret_v">5%</span>
+        </div>
+      </div>
+    </fieldset>
+
+    <fieldset>
+      <legend>行为</legend>
+      <div class="check">
+        <input type="checkbox" id="stairs" checked>
+        <label for="stairs">有人走楼梯</label>
+      </div>
+      <div class="row">
+        <label for="pressb">乱按比例<span class="hint">上下都按，多占一台梯</span></label>
+        <div class="range-wrap">
+          <input type="range" id="pressb" min="0" max="0.5" step="0.05" value="0">
+          <span class="range-val" id="pressb_v">0%</span>
+        </div>
+      </div>
+      <div class="check">
+        <input type="checkbox" id="overload">
+        <label for="overload">开启超载死锁<span class="hint">罕见，默认关闭</span></label>
+      </div>
+    </fieldset>
+
+    <fieldset>
+      <legend>仿真</legend>
+      <div class="row">
+        <label for="router">派梯算法</label>
+        <select id="router"></select>
+      </div>
+      <div class="row">
+        <label for="seed">随机种子<span class="hint">同种子结果完全一致</span></label>
+        <input type="number" id="seed" min="0" max="999999" step="1" value="42">
+      </div>
+    </fieldset>
+
+    <div class="actions">
+      <button id="run">重跑一遍</button>
+      <button id="link" class="ghost">复制配置链接</button>
+    </div>
+  </aside>
+
+  <section>
+    <ul class="issues" id="issues" hidden></ul>
+
+    <div class="cards">
+      <div class="card">
+        <div class="k">平均等梯</div>
+        <div class="v" id="v_wait">—<small>秒</small></div>
+        <div class="n" id="v_wait_n"></div>
+      </div>
+      <div class="card">
+        <div class="k">P90 等梯</div>
+        <div class="v" id="v_p90">—<small>秒</small></div>
+        <div class="n">十个人里有一个人比这个还久</div>
+      </div>
+      <div class="card">
+        <div class="k">被跳过的乘客</div>
+        <div class="v" id="v_bypass">—<small>%</small></div>
+        <div class="n">到站了却没挤上去，至少一次</div>
+      </div>
+      <div class="card">
+        <div class="k">门到门 P90</div>
+        <div class="v" id="v_d2d">—<small>秒</small></div>
+        <div class="n">从按电梯到出电梯</div>
+      </div>
+    </div>
+
+    <div class="grid2">
+      <div class="panel">
+        <h2>每层等多久</h2>
+        <div class="chart-wrap" id="chart_floor"><p class="dim">还没有结果。</p></div>
+      </div>
+      <div>
+        <div class="panel" style="margin-bottom:16px">
+          <h2>等待时间的分布</h2>
+          <div class="chart-wrap" id="chart_hist"><p class="dim">还没有结果。</p></div>
+        </div>
+        <div class="panel">
+          <h2>这一趟跑得怎么样</h2>
+          <table class="kv" id="balance"></table>
+        </div>
+      </div>
+    </div>
+  </section>
+</main>
+
+<footer>
+  <p><strong>这不是电梯招投标依据。</strong>真实性能受厂家群控算法、开关门延迟、有没有并联、有没有地下层、住户错峰习惯影响。这里的数字是量级参考，用来比较哪栋楼、哪种配置更熬人。</p>
+  <p>模型里每个默认常数都标了出处，查不到出处的写成待标定，见 <a href="../docs/MODEL.md">docs/MODEL.md</a>。想自己写调度算法，见 <a href="../docs/DISPATCH_API.md">docs/DISPATCH_API.md</a>。想批量扫参数，见 <a href="../docs/SIMULATE.md">docs/SIMULATE.md</a>。</p>
+</footer>
+
+<script src="charts.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
