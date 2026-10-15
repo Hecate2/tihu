@@ -80,8 +80,9 @@ pub fn run<R: Router, A: Assigner, B: Boarding>(
     let mut sv = Scratch::new(w.cars.len(), w.n_levels);
 
     let horizon = w.cfg.sim.horizon_s;
+    // 容量要给足：每位乘客最多排两个事件（进场与弃梯），再加轿厢的推进
     let mut heap: std::collections::BinaryHeap<Ev> =
-        std::collections::BinaryHeap::with_capacity(w.cars.len() + w.pax.len() + 8);
+        std::collections::BinaryHeap::with_capacity(w.cars.len() + w.pax.len() * 2 + 8);
     let mut seq: u64 = 0;
     let mut metrics = Metrics::with_floors(w.n_levels);
 
@@ -190,8 +191,9 @@ fn after_event<A: Assigner>(
     if w.cars.is_empty() {
         return;
     }
-    let mut owned: Vec<Option<CarId>> = w.calls.calls.iter().map(|c| c.owner).collect();
-    let before = owned.clone();
+    // 归属表借内核的复用缓冲，事件之间不再申请内存
+    sv.owned.clear();
+    sv.owned.extend(w.calls.calls.iter().map(|c| c.owner));
     let svref = SystemView {
         now: w.now,
         cars: &sv.briefs,
@@ -201,21 +203,23 @@ fn after_event<A: Assigner>(
         top_level: w.top,
         n_cars: w.cars.len(),
     };
-    assigner.reassign(&svref, &mut owned);
-    if before != owned {
-        for (i, slot) in owned.iter().enumerate() {
-            let live = {
-                let c = &w.calls.calls[i];
-                w.calls
-                    .slots
-                    .get(Call::slot_index(c.level, c.dir, w.basement))
-                    .copied()
-                    .flatten()
-                    == Some(c.id)
-            };
-            // 已经灭灯的外呼不许被重分配复活
-            w.calls.calls[i].owner = if live { *slot } else { None };
+    assigner.reassign(&svref, &mut sv.owned);
+    // 只写回真的变了的槽位，也就不必再拷一份旧归属去比
+    for (i, slot) in sv.owned.iter().enumerate() {
+        if w.calls.calls[i].owner == *slot {
+            continue;
         }
+        let live = {
+            let c = &w.calls.calls[i];
+            w.calls
+                .slots
+                .get(Call::slot_index(c.level, c.dir, w.basement))
+                .copied()
+                .flatten()
+                == Some(c.id)
+        };
+        // 已经灭灯的外呼不许被重分配复活
+        w.calls.calls[i].owner = if live { *slot } else { None };
     }
     sync_assignments(w);
 }
@@ -679,7 +683,7 @@ fn start_leg(w: &mut World, id: CarId, target: i16) -> bool {
     }
     // 这条腿沿途要接的外呼，以及要送的内选，全部预先排进停靠表
     plan_leg(w, id, here, target, dir);
-    schedule_next_floor(w, id);
+    advance_leg(w, id);
     true
 }
 
@@ -731,21 +735,8 @@ fn owns_call_at(w: &World, id: CarId, level: i16) -> bool {
 }
 
 /// 排下一次「走到下一层」的事件。用整条腿的曲线算累计时刻，不是逐层累加。
-fn schedule_next_floor(w: &mut World, id: CarId) {
-    let sign = if w.cars[id].dir == Dir::Up { 1 } else { -1 };
-    let here = w.cars[id].level.round() as i16;
-    let next = here + sign;
-    let spec = &w.cfg.cars[id];
-    let floor_h = w.cfg.building.floor_height as f64;
-    let profile = w.cars[id].dir.profile(&spec.up, &spec.down);
-    let cum = (next - w.cars[id].leg_from).abs() as f64 * floor_h;
-    let t = time_at_distance(w.cars[id].leg_dist, *profile, cum);
-    w.cars[id].level = next as f32;
-    w.cars[id].phase = CarPhase::Moving;
-    w.cars[id].next_event = w.cars[id].leg_start + t;
-}
-
-/// 继续往腿的目标层推进一层。
+///
+/// 开腿与途中推进共用这一处，排期逻辑就不会写岔。
 fn advance_leg(w: &mut World, id: CarId) {
     let sign = if w.cars[id].dir == Dir::Up { 1 } else { -1 };
     let here = w.cars[id].level.round() as i16;
@@ -761,6 +752,7 @@ fn advance_leg(w: &mut World, id: CarId) {
     let cum = (next - w.cars[id].leg_from).abs() as f64 * floor_h;
     let t = time_at_distance(w.cars[id].leg_dist, *profile, cum);
     w.cars[id].level = next as f32;
+    w.cars[id].phase = CarPhase::Moving;
     w.cars[id].next_event = w.cars[id].leg_start + t;
 }
 
@@ -944,34 +936,31 @@ fn board_and_alight<B: Boarding>(
         }
     }
 
-    // 再上人。反复扫整段队列，直到一整轮没人能上为止。
-    // 队首那位挤不上时，后面的人仍有机会上车，这是真实电梯的样子
+    // 再上人。一次扫完所有候选人。
+    //
+    // 队首那位挤不上时，后面的人仍有机会，所以扫描不能因为一次失败就停。
+    // 但不必反复重扫：随着人一个个上车，载客率只会升，挤不上的条件只会更差，
+    // 第二轮的结果不可能比第一轮好。
     let want = board_dir_at(w, id, lv);
     let mut boarded = 0usize;
-    let mut newly_boarded: Vec<usize> = Vec::with_capacity(16);
-    loop {
-        let mut progress = false;
-        let snapshot: Vec<usize> = w.hall[w.qidx(lv)].clone();
-        for pid in snapshot {
-            if !w.pax[pid].waiting() {
-                continue;
-            }
-            if try_board_one(w, id, lv, pid, want, boarding, now, rng) {
-                boarded += 1;
-                progress = true;
-                newly_boarded.push(pid);
-            }
+    let qi = w.qidx(lv);
+    let n = w.hall[qi].len();
+    for i in 0..n {
+        // 先把 id 复制出来，再进可变借用的上客流程。上客不动电梯厅名单，
+        // 所以这一趟按下标走是安全的，也就不用先克隆一份
+        let pid = w.hall[qi][i];
+        if !w.pax[pid].waiting() {
+            continue;
         }
-        if !progress {
-            break;
+        if try_board_one(w, id, lv, pid, want, boarding, now, rng) {
+            boarded += 1;
         }
     }
     w.cars[id].last_boarded = boarded;
 
-    // 上梯的人离开电梯厅
-    if !newly_boarded.is_empty() {
-        let idx = w.qidx(lv);
-        w.hall[idx].retain(|p| !newly_boarded.contains(p));
+    // 上梯的人离开电梯厅。刚上车的人才带 `boarded_car`，一次线性过滤就够
+    if boarded > 0 {
+        w.hall[qi].retain(|&p| w.pax[p].boarded_car.is_none());
     }
 
     // 未满载就走，而层上还有人等，记一次不全载发车

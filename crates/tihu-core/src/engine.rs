@@ -188,6 +188,8 @@ pub struct Scratch {
     pub(crate) car_calls: Vec<i16>,
     /// 当前轿厢名下的外呼
     pub(crate) mine: Vec<HallCall>,
+    /// 事件之间复用的外呼归属表，供重分配用
+    pub(crate) owned: Vec<Option<CarId>>,
     pub(crate) top_level: i16,
 }
 
@@ -200,6 +202,7 @@ impl Scratch {
             q: Vec::with_capacity(n_levels),
             car_calls: Vec::with_capacity(32),
             mine: Vec::with_capacity(16),
+            owned: Vec::with_capacity(n_levels * 2),
             top_level: 0,
         }
     }
@@ -428,14 +431,14 @@ impl World {
                 };
                 if outbound {
                     // 住宅层到出口层
-                    let exit = pick_exit(&mut rng, &self.cfg.building);
+                    let exit = pick_entrance_level(&mut rng, &self.cfg.building);
                     let is_return = rng.chance(Stream::Demand, ret);
                     self.emit_party(
                         level, exit, size, t0, is_child, is_return, horizon, &mut rng,
                     );
                 } else {
                     // 出口层到住宅层。有一部分人从地下车库上楼回家
-                    let ent = pick_entrance(&mut rng, &self.cfg.building);
+                    let ent = pick_entrance_level(&mut rng, &self.cfg.building);
                     let is_return = rng.chance(Stream::Demand, ret);
                     self.emit_party(
                         ent, level, size, t0, is_child, is_return, horizon, &mut rng,
@@ -445,10 +448,10 @@ impl World {
                 // 否则小楼里那一撮人会被四舍五入抹成零
                 if rng.chance(Stream::Destination, rev) {
                     if evening {
-                        let exit = pick_exit(&mut rng, &self.cfg.building);
+                        let exit = pick_entrance_level(&mut rng, &self.cfg.building);
                         self.emit_party(level, exit, size, t0, false, false, horizon, &mut rng);
                     } else {
-                        let ent = pick_entrance(&mut rng, &self.cfg.building);
+                        let ent = pick_entrance_level(&mut rng, &self.cfg.building);
                         self.emit_party(ent, level, size, t0, false, false, horizon, &mut rng);
                     }
                 }
@@ -663,20 +666,11 @@ fn n_slots_for(cfg: &Config) -> usize {
     (cfg.building.top_level + cfg.building.basement_levels.max(0) + 1) as usize * 2
 }
 
-/// 出门的人去哪一层。绝大多数去主入口层，少数直接下到地下车库。
+/// 主入口层还是地下车库。出门与回家两股客流都用它。
 ///
-/// 车库占比 7% 是 `docs/MODEL.md` 第 4.3 节的取值，待标定。
-fn pick_exit(rng: &mut crate::rng::Streams, b: &crate::config::Building) -> i16 {
-    let basements = b.basement_levels.max(0);
-    if basements > 0 && rng.chance(Stream::Demand, 0.07) {
-        -1 - rng.below(Stream::Demand, basements.min(2) as u32) as i16
-    } else {
-        LOBBY
-    }
-}
-
-/// 回家的人从哪一层出发。多数从主入口层，少数从地下车库直接上楼。
-fn pick_entrance(rng: &mut crate::rng::Streams, b: &crate::config::Building) -> i16 {
+/// 绝大多数人去主入口层，少数直接去地下车库。车库占比 7% 是
+/// `docs/MODEL.md` 第 4.3 节的取值，待标定。
+fn pick_entrance_level(rng: &mut crate::rng::Streams, b: &crate::config::Building) -> i16 {
     let basements = b.basement_levels.max(0);
     if basements > 0 && rng.chance(Stream::Demand, 0.07) {
         -1 - rng.below(Stream::Demand, basements.min(2) as u32) as i16
