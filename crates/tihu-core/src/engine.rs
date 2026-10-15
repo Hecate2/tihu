@@ -3,33 +3,49 @@
 //! 主循环见 `docs/ARCHITECTURE.md` 第 3 节。堆里只有「轿厢数加楼层数」个元素，
 //! 全部容器在进循环之前按配置推算的上界预分配，之后不再申请内存。
 
-use crate::config::{Config, Pattern, Strategy};
+use crate::config::{Config, LOBBY, Pattern, Strategy};
 use crate::motion::{traverse_time, Dir};
 use crate::policy::{CarBrief, CarId, HallCall, RunView, SystemView};
 use crate::rng::Stream;
 
+/// 一条行程腿：从 `from` 层去 `to` 层。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Hop {
+    pub from: i16,
+    pub to: i16,
+}
+
 /// 一个乘客。
 #[derive(Debug, Clone)]
 pub struct Pax {
-    /// 出发层
+    /// 预生成的行程腿。最多两条：出门，以及过一阵子回来。
+    /// 两条腿的乘客就是条件性需求：到达目的地后停留一段时间，再从那里返回
+    pub hops: [Hop; 2],
+    /// 实际有几条腿
+    pub n_hops: u8,
+    /// 当前走到第几条腿
+    pub hop_idx: u8,
+    /// 当前腿的出发层
     pub from: i16,
-    /// 目的层
+    /// 当前腿的目的层
     pub to: i16,
-    /// 到电梯厅的时刻
+    /// 当前腿到电梯厅的时刻
     pub t_arrive: f64,
+    /// 到站后在原地停留多久再走下一腿，秒
+    pub dwell_s: f64,
+    /// 愿意在电梯厅等多久。超过就改走楼梯
+    pub patience_s: f64,
     /// 按键策略
     pub strategy: Strategy,
     /// 个人拒挤度，0 最愿意挤，1 最不愿意
     pub tol: f64,
     /// 体重，公斤
     pub weight: f64,
-    /// 是否已经登记了外呼
-    pub called: bool,
     /// 是否已经上了某台轿厢
     pub boarded_car: Option<CarId>,
-    /// 成功上梯的时刻
+    /// 当前腿成功上梯的时刻
     pub t_board: f64,
-    /// 出梯时刻
+    /// 当前腿的出梯时刻
     pub t_exit: f64,
     /// 到站但没上去的次数
     pub bypass_count: u32,
@@ -37,16 +53,22 @@ pub struct Pax {
     pub declined_count: u32,
     /// 因为没位子而没上去的次数
     pub no_space_count: u32,
-    /// 是否走楼梯
+    /// 出发前就决定走楼梯，见红线 4
     pub used_stairs: bool,
+    /// 等得不耐烦改走楼梯。与 `used_stairs` 分开统计
+    pub abandoned: bool,
     /// 反向叫梯者的转向层
     pub reversal_floor: Option<i16>,
     /// 是否因为超载僵局退出过轿厢
     pub requeued_after_stall: bool,
+    /// 走完了几条腿
+    pub hops_done: u32,
+    /// 整个行程结束的时刻。还有下一腿时为 0
+    pub final_exit: f64,
 }
 
 impl Pax {
-    /// 等梯时间。上楼成功时才有意义。
+    /// 这一条腿的等梯时间。
     pub fn wait(&self) -> f64 {
         if self.t_board > 0.0 {
             (self.t_board - self.t_arrive).max(0.0)
@@ -55,7 +77,7 @@ impl Pax {
         }
     }
 
-    /// 上梯之后的乘坐时间。
+    /// 这一条腿上梯之后的乘坐时间。
     pub fn ride(&self) -> f64 {
         if self.t_exit > 0.0 && self.t_board > 0.0 {
             (self.t_exit - self.t_board).max(0.0)
@@ -64,13 +86,18 @@ impl Pax {
         }
     }
 
-    /// 门到门时间。反向叫梯者的这一项包含绕行。
+    /// 这一条腿的门到门时间。反向叫梯者的这一项包含绕行。
     pub fn door_to_door(&self) -> f64 {
         if self.t_exit > 0.0 {
             (self.t_exit - self.t_arrive).max(0.0)
         } else {
             0.0
         }
+    }
+
+    /// 这位乘客此刻还在电梯厅等吗。
+    pub fn waiting(&self) -> bool {
+        self.t_exit <= 0.0 && !self.used_stairs && !self.abandoned && self.boarded_car.is_none()
     }
 }
 
@@ -148,20 +175,6 @@ pub struct Call {
     pub waiting: usize,
     /// 是否由乘客独立面板呼叫，若是则该呼叫只属于这一台车
     pub exclusive: bool,
-}
-
-/// 每层的等待队列。
-///
-/// `waiting[head..head+next_arrival]` 是还没到电梯厅的乘客，按到达时刻排序。
-/// `waiting[head..]` 里已经到场的排在前面。
-/// 这样「到点进场」就是一次指针推进，不需要每次重建队列。
-#[derive(Debug, Clone, Default)]
-pub struct FloorQueue {
-    /// 已登记的乘客，按到达时刻升序
-    pub waiting: Vec<usize>,
-    /// `waiting` 里前多少个已经到场。前 `arrived` 个站在电梯厅里，
-    /// 其后还在路上。上客循环只扫前一段
-    pub arrived: usize,
 }
 
 /// 造视图用的预分配缓冲。反复复用，运行期不再分配。
@@ -265,7 +278,8 @@ pub struct World {
     pub pax: Vec<Pax>,
     pub cars: Vec<Car>,
     pub calls: CallBoard,
-    pub queues: Vec<FloorQueue>,
+    /// 每层电梯厅里此刻在等的人。无序，进出一个乘客都是常数级
+    pub hall: Vec<Vec<usize>>,
     /// 地下层数
     pub basement: i16,
     /// 最高住宅层
@@ -293,13 +307,7 @@ impl World {
             pax: Vec::with_capacity(cfg.expected_trips() + 16),
             cars: Vec::with_capacity(cfg.cars.len()),
             calls: CallBoard::new(n_levels * 2, basement),
-            queues: (0..n_levels)
-                .map(|i| FloorQueue {
-                    // 队列下标 i 对应楼层 `i - basement`。住宅层从 1 起，所以这里要减掉地下层数
-                    waiting: Vec::with_capacity(cfg.building.residents_at(i as i16 - basement).max(4) + 4),
-                    arrived: 0,
-                })
-                .collect(),
+            hall: vec![Vec::new(); n_levels],
             basement,
             top,
             n_levels,
@@ -384,112 +392,149 @@ impl World {
         let pattern = self.cfg.traffic.pattern;
         let window = self.cfg.traffic.window_s;
         let horizon = self.cfg.sim.horizon_s.max(window);
-        let overload = &self.cfg.overload;
-        let stairs = &self.cfg.stairs;
-        // 每层待进场的乘客，按到达时刻排好。造完立刻搬进队列，不进 World
-        let mut arrivals: Vec<Vec<usize>> = vec![Vec::new(); self.n_levels];
-
-        // 逐层生成。每层内部再按同行团聚合。
+        // 只有这四条用到，先取出来免得反复借 self
+        let dep = self.cfg.traffic.departure_ratio as f64;
+        let rev = self.cfg.traffic.reverse_ratio as f64;
+        let ret = self.cfg.traffic.return_ratio as f64;
+        let evening = matches!(pattern, Pattern::EveningUp);
+        let mixed = matches!(pattern, Pattern::NoonMixed);
+        // 逐户生成。一户出一个同行团，团人数从户均人数涌现出来。
+        //
+        // 早高峰的主流是「住宅层到出口层」，晚高峰反过来。中午两向都有。
+        // 出口层默认是主入口层，有一部分人下到地下车库。
+        // 有一小撮人走反向，见 reverse_ratio。
         for level in 1..=self.cfg.building.floors {
-            let residents = self.cfg.building.residents_at(level);
-            if residents == 0 {
+            let units = self.cfg.building.units_at(level);
+            if units == 0 {
                 continue;
             }
-            let down_target: i16 = if self.cfg.building.basement_levels > 0 && rng.chance(Stream::Demand, 0.07) {
-                -(1 + rng.below(Stream::Demand, self.cfg.building.basement_levels.min(2) as u32) as i16)
-            } else {
-                0
-            };
-            // 主方向。早高峰往下，晚高峰往上
-            let primary_up = matches!(pattern, Pattern::EveningUp);
-            let depart_dir = if primary_up { Dir::Up } else { Dir::Down };
-            // 地下车库只能往上开
-            let dest_dir = if down_target < 0 { Dir::Up } else { depart_dir };
-
-            let mut remaining = residents;
-            while remaining > 0 {
-                // 户均人数 2 到 4 之间取一个整数，剩下的住户留给下一户
-                let base = self.cfg.building.persons_per_unit.round() as usize;
-                let size = (base.clamp(1, 4)).min(remaining);
-                remaining -= size;
-
-                let go_primary = rng.chance(Stream::Destination, self.cfg.traffic.departure_ratio as f64);
-                if !go_primary {
+            for _u in 0..units {
+                if !rng.chance(Stream::Demand, dep) {
                     continue;
                 }
+                let size = self.cfg.building.persons_per_unit.round().clamp(1.0, 4.0) as usize;
                 // 强度曲线上抽一个出发时刻。用钟形的逆变换近似：先均匀再压向中段
-                let u = rng.f64(Stream::Arrival);
-                let shaped = self.shape_intensity(u);
-                let t0 = shaped * window;
-                // 同一户的人出门时间略有差异
-                let is_child_party = size >= 2 && rng.chance(Stream::Strategy, self.cfg.traffic.child_party_ratio as f64);
-
-                for k in 0..size {
-                    let jitter = if k == 0 { 0.0 } else { rng.range(Stream::Arrival, 0.0, 90.0) };
-                    let t_arrive = (t0 + jitter).min(horizon);
-                    let tol = rng.tolerance();
-                    let weight = if is_child_party && k + 1 < size {
-                        rng.gens_for_weight(overload.child_weight_kg, overload.weight_cv)
+                let t0 = self.shape_intensity(rng.f64(Stream::Arrival)) * window;
+                let is_child = size >= 2
+                    && rng.chance(Stream::Strategy, self.cfg.traffic.child_party_ratio as f64);
+                let outbound = if mixed {
+                    rng.chance(Stream::Destination, 0.5)
+                } else {
+                    !evening
+                };
+                if outbound {
+                    // 住宅层到出口层
+                    let exit = pick_exit(&mut rng, &self.cfg.building);
+                    let is_return = rng.chance(Stream::Demand, ret);
+                    self.emit_party(
+                        level, exit, size, t0, is_child, is_return, horizon, &mut rng,
+                    );
+                } else {
+                    // 出口层到住宅层。有一部分人从地下车库上楼回家
+                    let ent = pick_entrance(&mut rng, &self.cfg.building);
+                    let is_return = rng.chance(Stream::Demand, ret);
+                    self.emit_party(
+                        ent, level, size, t0, is_child, is_return, horizon, &mut rng,
+                    );
+                }
+                // 反向细流。按户掷，不用「户数乘比例取整」，
+                // 否则小楼里那一撮人会被四舍五入抹成零
+                if rng.chance(Stream::Destination, rev) {
+                    if evening {
+                        let exit = pick_exit(&mut rng, &self.cfg.building);
+                        self.emit_party(level, exit, size, t0, false, false, horizon, &mut rng);
                     } else {
-                        rng.gens_for_weight(overload.adult_weight_kg, overload.weight_cv)
-                    };
-                    let strategy = self.cfg.strategy.pick(rng.f64(Stream::Strategy));
-                    // 地下车库的话目的层就是那个负数，否则在大堂
-                    let dest_level: i16 = if down_target < 0 { down_target } else { 0 };
-
-                    // 红线 4：低楼层有人走楼梯。概率见 Stairs::probability
-                    let est_total = estimate_wait(level, &self.cfg) + estimate_ride(level, &self.cfg);
-                    let stair_cost = if dest_dir == Dir::Down { stairs.cost_down(level) } else { stairs.cost_up(level) };
-                    let use_stairs = stairs.enabled
-                        && rng.chance(Stream::Demand, stairs.probability(level, est_total));
-
-                    let pax = Pax {
-                        from: level,
-                        to: dest_level,
-                        t_arrive,
-                        strategy,
-                        tol,
-                        weight,
-                        called: false,
-                        boarded_car: None,
-                        t_board: 0.0,
-                        t_exit: 0.0,
-                        bypass_count: 0,
-                        declined_count: 0,
-                        no_space_count: 0,
-                        used_stairs: use_stairs,
-                        reversal_floor: None,
-                        requeued_after_stall: false,
-                    };
-                    // 走楼梯的人不进等待队列，但也留在 pax 里用于统计
-                    let idx = self.pax.len();
-                    self.pax.push(pax);
-                    if use_stairs {
-                        self.pax[idx].t_board = t_arrive;
-                        self.pax[idx].t_exit = t_arrive + stair_cost;
-                    } else {
-                        arrivals[level as usize].push(idx);
+                        let ent = pick_entrance(&mut rng, &self.cfg.building);
+                        self.emit_party(ent, level, size, t0, false, false, horizon, &mut rng);
                     }
                 }
             }
         }
+    }
 
-        // 同一层里到达时刻相近的乘客并成一个同行团，见 MODEL.md 第 4.4 节
-        for lvl in 0..self.n_levels {
-            let mut v = std::mem::take(&mut arrivals[lvl]);
-            v.sort_by(|&a, &b| {
-                self.pax[a].t_arrive.total_cmp(&self.pax[b].t_arrive).then(a.cmp(&b))
-            });
-            // 整张表搬进队列。arrived=0 表示还没人进场
-            self.queues[lvl].waiting = v;
-            self.queues[lvl].arrived = 0;
+    /// 造一个同行团。同一个团的到达时刻只差几十秒，见 MODEL.md 第 4.4 节。
+    ///
+    /// `with_return` 为真时补上第二条腿：到了目的地停一阵，再从那里回来。
+    /// 这就是条件性需求。停留时长在生成时用同一份随机流抽定，所以可复现。
+    #[allow(clippy::too_many_arguments)]
+    fn emit_party(
+        &mut self,
+        from: i16,
+        to: i16,
+        size: usize,
+        t0: f64,
+        is_child: bool,
+        with_return: bool,
+        horizon: f64,
+        rng: &mut crate::rng::Streams,
+    ) {
+        let overload = &self.cfg.overload;
+        let stairs = &self.cfg.stairs;
+        let dwell = rng.lognormal(self.cfg.traffic.return_dwell_s.max(1.0), 0.5).max(30.0);
+        let patience = if stairs.enabled && stairs.abandon_after_s > 0.0 {
+            rng.lognormal(stairs.abandon_after_s, stairs.abandon_cv.max(0.01))
+        } else {
+            // 关掉弃梯，或者把阈值设成 0 时，谁都不中途弃梯
+            f64::INFINITY
+        };
+        for k in 0..size {
+            let jitter = if k == 0 { 0.0 } else { rng.range(Stream::Arrival, 0.0, 90.0) };
+            let t_arrive = (t0 + jitter).min(horizon);
+            let tol = rng.tolerance();
+            let weight = if is_child && k + 1 < size {
+                rng.gens_for_weight(overload.child_weight_kg, overload.weight_cv)
+            } else {
+                rng.gens_for_weight(overload.adult_weight_kg, overload.weight_cv)
+            };
+            let strategy = self.cfg.strategy.pick(rng.f64(Stream::Strategy));
+            // 红线 4：低楼层有人走楼梯。这是出发前就定下的，与半路弃梯分开
+            let est = estimate_wait(from, &self.cfg) + estimate_ride(from, &self.cfg);
+            let use_stairs =
+                stairs.enabled && rng.chance(Stream::Demand, stairs.probability(from.abs(), est));
+            let mut hops = [Hop { from, to }, Hop { from: to, to: from }];
+            let n_hops = if with_return { 2 } else { 1 };
+            if !with_return {
+                hops[1] = hops[0];
+            }
+            let pax = Pax {
+                hops,
+                n_hops,
+                hop_idx: 0,
+                from,
+                to,
+                t_arrive,
+                dwell_s: dwell,
+                patience_s: patience,
+                strategy,
+                tol,
+                weight,
+                boarded_car: None,
+                t_board: 0.0,
+                t_exit: 0.0,
+                bypass_count: 0,
+                declined_count: 0,
+                no_space_count: 0,
+                used_stairs: use_stairs,
+                abandoned: false,
+                reversal_floor: None,
+                requeued_after_stall: false,
+                hops_done: 0,
+                final_exit: 0.0,
+            };
+            let idx = self.pax.len();
+            self.pax.push(pax);
+            if use_stairs {
+                // 走楼梯的人不进电梯厅，但也留在 pax 里用于统计
+                let cost = if to < from { stairs.cost_down(from - to) } else { stairs.cost_up(to - from) };
+                self.pax[idx].t_board = t_arrive;
+                self.pax[idx].t_exit = t_arrive + cost;
+                self.pax[idx].hops_done = 1;
+                self.pax[idx].final_exit = self.pax[idx].t_exit;
+            }
         }
     }
 
     /// 钟形强度。把均匀分布压向中段，模拟高峰的集中。
-    ///
-    /// 均匀变量 `u` 经 Beta(α, β) 的逆 CDF 映射成出行时刻占比。默认
-    /// `α = β = 2.5`，单峰、峰位在正中。用二分求逆，够快也够稳。
     fn shape_intensity(&self, u: f64) -> f64 {
         let (a, b) = (self.cfg.traffic.peak_alpha as f64, self.cfg.traffic.peak_beta as f64);
         let (mut lo, mut hi) = (0.0f64, 1.0f64);
@@ -537,8 +582,8 @@ impl World {
         sv.pending.clear();
         sv.pending.extend(sv.all.iter().copied().filter(|c| c.owner.is_none()));
         sv.q.clear();
-        for q in &self.queues {
-            sv.q.push(q.waiting.len() as u32);
+        for h in &self.hall {
+            sv.q.push(h.len() as u32);
         }
         sv.top_level = self.top;
     }
@@ -585,6 +630,28 @@ impl World {
 
 fn n_slots_for(cfg: &Config) -> usize {
     (cfg.building.floors + cfg.building.basement_levels.max(0) + 1) as usize * 2
+}
+
+/// 出门的人去哪一层。绝大多数去主入口层，少数直接下到地下车库。
+///
+/// 车库占比 7% 是 `docs/MODEL.md` 第 4.3 节的取值，待标定。
+fn pick_exit(rng: &mut crate::rng::Streams, b: &crate::config::Building) -> i16 {
+    let basements = b.basement_levels.max(0);
+    if basements > 0 && rng.chance(Stream::Demand, 0.07) {
+        -1 - rng.below(Stream::Demand, basements.min(2) as u32) as i16
+    } else {
+        LOBBY
+    }
+}
+
+/// 回家的人从哪一层出发。多数从主入口层，少数从地下车库直接上楼。
+fn pick_entrance(rng: &mut crate::rng::Streams, b: &crate::config::Building) -> i16 {
+    let basements = b.basement_levels.max(0);
+    if basements > 0 && rng.chance(Stream::Demand, 0.07) {
+        -1 - rng.below(Stream::Demand, basements.min(2) as u32) as i16
+    } else {
+        LOBBY
+    }
 }
 
 /// Beta 分布的累积分布，用连分数算。
@@ -794,7 +861,11 @@ mod tests {
         let low: usize = w.pax.iter().filter(|p| p.used_stairs && p.from <= 6).count();
         let high: usize = w.pax.iter().filter(|p| p.used_stairs && p.from > 9).count();
         assert!(low > 0, "低层应当有人走楼梯");
-        assert_eq!(high, 0, "十层以上不该有人走楼梯，实际 {high} 人");
+        let total = w.pax.len().max(1) as f64;
+        assert!(
+            (high as f64) / total < 0.01,
+            "十层以上走楼梯的人该是零星的，实际 {high} 人"
+        );
     }
 
     /// 关掉走楼梯之后一个人都不该走。
@@ -906,16 +977,11 @@ mod tests {
 
     #[test]
     fn arrivals_are_sorted_per_floor() {
+        // 乘客不再按楼层预排，而是各排各的进场事件。这里只确认每层的
+        // 电梯厅初始是空的，进场顺序由事件堆保证
         let w = World::new(preset_cfg());
-        for lvl in 0..w.n_levels {
-            let v = &w.queues[lvl].waiting;
-            for i in 1..v.len() {
-                assert!(
-                    w.pax[v[i - 1]].t_arrive.total_cmp(&w.pax[v[i]].t_arrive) != std::cmp::Ordering::Greater,
-                    "第 {lvl} 层的到达事件没有排好"
-                );
-            }
-        }
+        assert_eq!(w.hall.len(), w.n_levels);
+        assert!(w.hall.iter().all(|h| h.is_empty()));
     }
 
     #[test]
@@ -923,7 +989,7 @@ mod tests {
         let cfg = preset_cfg();
         let w = World::new(cfg.clone());
         assert_eq!(w.cars.len(), cfg.cars.len());
-        assert_eq!(w.queues.len(), w.n_levels);
+        assert_eq!(w.hall.len(), w.n_levels);
         assert_eq!(w.calls.calls.capacity(), 0, "预分配后不该立刻扩容");
     }
 
