@@ -272,6 +272,8 @@ pub struct World {
     pub top: i16,
     /// 楼层槽位总数，从 `-basement` 到 `top`
     pub n_levels: usize,
+    /// 每台轿厢服务哪些楼层。下标 `[car][level + basement]`
+    pub car_stops: Vec<Vec<bool>>,
     /// 当前仿真时刻，秒
     pub(crate) now: f64,
 }
@@ -301,12 +303,47 @@ impl World {
             basement,
             top,
             n_levels,
+            car_stops: Vec::new(),
             now: 0.0,
             cfg,
         };
+        w.build_stop_sets();
         w.build_cars();
         w.build_pax();
         w
+    }
+
+    /// 把每台轿厢的停靠描述展开成位图，运行期查起来是一次数组访问。
+    fn build_stop_sets(&mut self) {
+        let basement = self.basement;
+        self.car_stops = self
+            .cfg
+            .cars
+            .iter()
+            .map(|spec| {
+                (0..self.n_levels)
+                    .map(|i| spec.stops.serves(i as i16 - basement))
+                    .collect()
+            })
+            .collect();
+    }
+
+    /// 这台轿厢停不停这一层。
+    #[inline]
+    pub fn car_serves(&self, id: CarId, level: i16) -> bool {
+        if level < -self.basement || level > self.top {
+            return false;
+        }
+        self.car_stops[id][(level + self.basement) as usize]
+    }
+
+    /// 这一层有哪些轿厢愿意停，按 `assigned` 少的排前面。
+    pub fn serving_cars_least_busy(&self, level: i16) -> Vec<CarId> {
+        let mut ids: Vec<CarId> = (0..self.cars.len())
+            .filter(|&i| self.car_serves(i, level) && self.cars[i].phase != CarPhase::Stalled)
+            .collect();
+        ids.sort_by_key(|&i| (self.cars[i].assigned.len(), i));
+        ids
     }
 
     fn build_cars(&mut self) {
@@ -314,7 +351,7 @@ impl World {
         for (i, spec) in self.cfg.cars.iter().enumerate() {
             self.cars.push(Car {
                 id: i,
-                level: 0.0,
+                level: spec.initial_level as f32,
                 dir: Dir::None,
                 phase: CarPhase::Idle,
                 next_event: f64::INFINITY,

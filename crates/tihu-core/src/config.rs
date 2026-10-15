@@ -56,7 +56,12 @@ impl Building {
         if level < 1 || level > self.floors {
             return 0;
         }
-        let mut n = self.units_per_floor[(level - 1) as usize];
+        // 户数表可能还没补齐（校验阶段就会走到这里），越界一律按 0 户算
+        let mut n = self
+            .units_per_floor
+            .get((level - 1) as usize)
+            .copied()
+            .unwrap_or(0);
         if self.top_floor_duplex && level == self.floors {
             n = (n / 2).max(1);
         }
@@ -87,6 +92,72 @@ impl Building {
     }
 }
 
+/// 一台轿厢停靠哪些楼层。
+///
+/// 高层住宅的梯群常常有分区：一部只停单层，一部只停双层，或者高低区分开。
+/// 这里给出几种写起来方便的写法，可以互相组合。
+#[derive(Debug, Clone, PartialEq)]
+pub enum StopSpec {
+    /// 全部楼层
+    All,
+    /// 显式枚举要停的楼层
+    List(Vec<i16>),
+    /// 只停奇数层。主入口层与地下层一律停靠
+    Odd,
+    /// 只停偶数层。主入口层与地下层一律停靠
+    Even,
+    /// 只停 `[lo, hi]` 这个闭区间
+    Zone { lo: i16, hi: i16 },
+    /// 上面若干条的并集
+    Union(Vec<StopSpec>),
+}
+
+impl Default for StopSpec {
+    fn default() -> Self {
+        StopSpec::All
+    }
+}
+
+impl StopSpec {
+    /// 枚举若干层。
+    pub fn list(levels: impl IntoIterator<Item = i16>) -> Self {
+        StopSpec::List(levels.into_iter().collect())
+    }
+
+    /// 一个闭区间。
+    pub fn zone(lo: i16, hi: i16) -> Self {
+        StopSpec::Zone { lo, hi }
+    }
+
+    /// 单双层。`odd = true` 是单层梯。
+    pub fn parity(odd: bool) -> Self {
+        if odd {
+            StopSpec::Odd
+        } else {
+            StopSpec::Even
+        }
+    }
+
+    /// 若干条的并集。
+    pub fn union(parts: Vec<StopSpec>) -> Self {
+        StopSpec::Union(parts)
+    }
+
+    /// 这台车停不停 `level` 层。
+    pub fn serves(&self, level: i16) -> bool {
+        match self {
+            StopSpec::All => true,
+            StopSpec::List(v) => v.contains(&level),
+            // 单双层说的是住宅楼层。主入口层与地下层人人都停，
+            // 否则地下车库那几层会没有一台车愿意去
+            StopSpec::Odd => level <= LOBBY || level % 2 != 0,
+            StopSpec::Even => level <= LOBBY || level % 2 == 0,
+            StopSpec::Zone { lo, hi } => level >= *lo && level <= *hi,
+            StopSpec::Union(parts) => parts.iter().any(|p| p.serves(level)),
+        }
+    }
+}
+
 /// 一台轿厢的规格。
 #[derive(Debug, Clone)]
 pub struct CarSpec {
@@ -100,6 +171,10 @@ pub struct CarSpec {
     pub down: MotionProfile,
     /// 开关门时序
     pub doors: DoorTiming,
+    /// 停靠楼层。默认全部
+    pub stops: StopSpec,
+    /// 初始所在层。默认停在主入口层
+    pub initial_level: i16,
 }
 
 impl Default for CarSpec {
@@ -110,6 +185,8 @@ impl Default for CarSpec {
             up: MotionProfile::default(),
             down: MotionProfile::default(),
             doors: DoorTiming::default(),
+            stops: StopSpec::All,
+            initial_level: LOBBY,
         }
     }
 }
@@ -701,6 +778,39 @@ impl Config {
                 "物理极限人数不可能小于额定人数".into(),
             ));
         }
+        // 每一层都要有至少一台轿厢愿意停，否则那一层的人永远等不到车
+        for level in -b.basement_levels.max(0)..=b.floors {
+            if !self.cars.iter().any(|c| c.stops.serves(level)) {
+                v.issues.push(Issue {
+                    severity: Severity::Error,
+                    code: "unserved_floor",
+                    message: format!("第 {level} 层没有任何一台轿厢停靠，那一层的人上不了梯"),
+                    level: Some(level),
+                });
+            }
+        }
+        // 有住户的楼层，还得有一台既停这一层又停主入口层的轿厢。
+        // 早晚高峰的主体客流是「住宅层与主入口层之间」，分区梯漏掉主入口，
+        // 那一层的住户就上不了车也下不去
+        for level in 1..=b.floors {
+            if b.residents_at(level) == 0 {
+                continue;
+            }
+            let through = self
+                .cars
+                .iter()
+                .any(|c| c.stops.serves(level) && c.stops.serves(LOBBY));
+            if !through {
+                v.issues.push(Issue {
+                    severity: Severity::Error,
+                    code: "no_through_car",
+                    message: format!(
+                        "第 {level} 层没有一台轿厢同时停靠主入口层，这一层的人去了主入口层就回不来",
+                    ),
+                    level: Some(level),
+                });
+            }
+        }
         v
     }
 
@@ -720,6 +830,9 @@ impl Config {
             c.down = c.down.sanitized();
             c.capacity_rated = c.capacity_rated.clamp(1, 40);
             c.rated_load_kg = c.rated_load_kg.clamp(100.0, 5000.0);
+            c.initial_level = c
+                .initial_level
+                .clamp(-self.building.basement_levels.max(0), self.building.floors.max(1));
         }
         self
     }
