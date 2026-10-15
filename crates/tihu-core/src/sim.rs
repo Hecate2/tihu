@@ -1215,6 +1215,7 @@ pub fn quick(mut cfg: Config, seed: u64) -> Run {
 mod tests {
     use super::*;
     use crate::config::{preset, CarSpec};
+    use crate::policy::RunView;
 
     fn small() -> Config {
         let mut c = Config::default();
@@ -1641,5 +1642,34 @@ mod tests {
         let r = default_run(c);
         assert_eq!(r.metrics.stalls, 0);
         assert_eq!(r.metrics.stall_seconds, 0.0);
+    }
+
+    /// 没人呼叫时，算法也能主动把轿厢挪到想待的那一层。
+    #[test]
+    fn router_can_move_an_idle_car_without_any_call() {
+        struct AlwaysUpTo5;
+        impl Router for AlwaysUpTo5 {
+            fn name(&self) -> &'static str {
+                "always_up_to_5"
+            }
+            fn next_leg(&self, v: &RunView<'_>) -> Leg {
+                let here = v.level();
+                if here < 5 {
+                    Leg::Up(5)
+                } else if here > 5 {
+                    Leg::Down(5)
+                } else {
+                    Leg::Park
+                }
+            }
+        }
+        let mut c = small();
+        c.traffic.departure_ratio = 0.0; // 一个乘客都没有
+        let mut router = AlwaysUpTo5;
+        let mut assigner = crate::builtin::NearestCar;
+        let boarding = DefaultBoarding::default();
+        let r = run(c, &mut router, &mut assigner, &boarding);
+        assert_eq!(r.metrics.pax_total, 0, "这一份配置不该有乘客");
+        assert_eq!(r.world.cars[0].level, 5.0, "轿厢应当自己挪到第五层待命");
     }
 }
