@@ -1,0 +1,9 @@
+[package]
+name = "tihu-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "梯户模拟器的仿真内核。无 IO，无网络，无外部依赖"
+
+[dependencies]

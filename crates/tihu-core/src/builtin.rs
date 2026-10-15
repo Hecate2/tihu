@@ -1,0 +1,682 @@
+//! 内建的调度算法，以及算法注册表。
+//!
+//! 写一个新算法在这里加一行 `register!`，网页下拉框和命令行 `--router`
+//! 就同时能用上，不需要改动 `tihu-core` 的其他地方。见 `docs/DISPATCH_API.md`。
+
+use crate::config::Boarding as BoardCfg;
+use crate::motion::Dir;
+use crate::policy::{AdmitSample, Assigner, Boarding, CarId, HallCall, Idle, Leg, RunView, SystemView, Verdict};
+
+/// 经典集选。保持方向，把沿途同向外呼和内选服务完，到底才反向。
+///
+/// 这是住宅楼的默认做法。老楼装的就是它。
+#[derive(Debug, Default, Clone)]
+pub struct CollectiveScan;
+
+impl CollectiveScan {
+    fn going_up(v: &RunView<'_>) -> bool {
+        match v.heading {
+            Dir::Up => true,
+            Dir::Down => false,
+            // 没方向时看哪边有活
+            Dir::None => v.has_call_up() || v.highest_car_call().is_some_and(|l| l > v.level()),
+        }
+    }
+}
+
+impl crate::policy::Router for CollectiveScan {
+    fn name(&self) -> &'static str {
+        "collective_scan"
+    }
+
+    fn should_stop(&self, v: &RunView<'_>) -> bool {
+        if v.will_alight(v.level()) {
+            return true;
+        }
+        match v.heading {
+            // 只接同向的外呼。同向没人了就准备到底反向
+            Dir::Up => v.has_call(v.level(), Dir::Up),
+            Dir::Down => v.has_call(v.level(), Dir::Down),
+            // 停着不动时只在有事可做时才开门，否则会空转
+            Dir::None => v.has_call_up() || v.has_call_down(),
+        }
+    }
+
+    fn next_leg(&self, v: &RunView<'_>) -> Leg {
+        let up = Self::going_up(v);
+        if up {
+            // 上行。看这一趟有没有上行任务，没有就看内选
+            let target = v.extreme(Dir::Up).or_else(|| v.highest_car_call());
+            match target {
+                Some(t) if t > v.level() => Leg::Up(t),
+                // 上行方向没活了，反向
+                _ => {
+                    let down = v.extreme(Dir::Down).or_else(|| v.lowest_car_call());
+                    match down {
+                        Some(t) if t < v.level() => Leg::Down(t),
+                        Some(t) => Leg::Up(t),
+                        None => Leg::Park,
+                    }
+                }
+            }
+        } else {
+            let target = v.extreme(Dir::Down).or_else(|| v.lowest_car_call());
+            match target {
+                Some(t) if t < v.level() => Leg::Down(t),
+                _ => {
+                    let up = v.extreme(Dir::Up).or_else(|| v.highest_car_call());
+                    match up {
+                        Some(t) if t > v.level() => Leg::Up(t),
+                        Some(t) => Leg::Down(t),
+                        None => Leg::Park,
+                    }
+                }
+            }
+        }
+    }
+
+    fn idle(&self, _v: &RunView<'_>) -> Idle {
+        Idle::Hold
+    }
+}
+
+/// 集选加满载直驶。载客率到阈值之后不再响应外呼，直接掠过。
+///
+/// 这一条直接对应 `docs/MODEL.md` 第 6.2 节的因果：多按出来的那条无用外呼
+/// 会把一台轿厢拉去跑冤枉路，满载直驶能挡掉一部分。
+#[derive(Debug, Default, Clone)]
+pub struct SelectiveCollective {
+    /// 超过这个载客率就开始直驶
+    pub bypass_ratio: f64,
+}
+
+impl crate::policy::Router for SelectiveCollective {
+    fn name(&self) -> &'static str {
+        "selective_collective"
+    }
+
+    fn should_stop(&self, v: &RunView<'_>) -> bool {
+        if v.will_alight(v.level()) {
+            return true;
+        }
+        if v.load_ratio() >= self.bypass_ratio {
+            // 满载直驶。但名下这些外呼不能就此丢掉，只是这次不服务
+            return false;
+        }
+        CollectiveScan.should_stop(v)
+    }
+
+    fn next_leg(&self, v: &RunView<'_>) -> Leg {
+        if v.load_ratio() >= self.bypass_ratio {
+            // 跳过外呼，只按内选走
+            let up = match v.heading {
+                Dir::Down => false,
+                _ => true,
+            };
+            if up {
+                match v.highest_car_call() {
+                    Some(t) if t > v.level() => return Leg::Up(t),
+                    _ => {}
+                }
+                if let Some(t) = v.lowest_car_call() {
+                    if t < v.level() {
+                        return Leg::Down(t);
+                    }
+                }
+            } else if let Some(t) = v.lowest_car_call() {
+                if t < v.level() {
+                    return Leg::Down(t);
+                }
+            } else if let Some(t) = v.highest_car_call() {
+                if t > v.level() {
+                    return Leg::Up(t);
+                }
+            }
+        }
+        CollectiveScan.next_leg(v)
+    }
+
+    fn idle(&self, v: &RunView<'_>) -> Idle {
+        CollectiveScan.idle(v)
+    }
+}
+
+/// 早高峰专用的下行扫描。先上行到最高任务层，再一路下行扫到底。
+///
+/// 就是 `docs/DISPATCH_API.md` 第 3.2 节那个例子，本身也是一个可用的基线。
+#[derive(Debug, Default, Clone)]
+pub struct DownPeakSweep;
+
+impl crate::policy::Router for DownPeakSweep {
+    fn name(&self) -> &'static str {
+        "down_peak_sweep"
+    }
+
+    fn should_stop(&self, v: &RunView<'_>) -> bool {
+        if v.will_alight(v.level()) {
+            return true;
+        }
+        match v.heading {
+            Dir::Down => v.has_call(v.level(), Dir::Down),
+            // 上行途中只跑去最高那层接人，中途不停。
+            // 早高峰名下几乎全是下行任务，所以这里取「不分方向」的最高层，
+            // 只按上行方向去找那一层找不到，那是逻辑错误。
+            Dir::Up => v.highest_pending().map(|h| h == v.level()).unwrap_or(false),
+            // 停着不动时，只在真的有事可做时才开门。
+            // 这里若无条件返回 true，轿厢每次醒来都会进一次空停靠，
+            // 形成零时刻死循环。
+            Dir::None => {
+                v.has_call_up() || v.has_call_down() || v.will_alight(v.level())
+            }
+        }
+    }
+
+    fn next_leg(&self, v: &RunView<'_>) -> Leg {
+        // 名下还有下行任务就继续往下扫
+        if let Some(f) = v.extreme(Dir::Down) {
+            if f < v.level() {
+                return Leg::Down(f);
+            }
+        }
+        if let Some(f) = v.lowest_car_call() {
+            if f < v.level() {
+                return Leg::Down(f);
+            }
+        }
+        // 下行任务清空了，去接最高的一条，然后重新开始往下扫
+        let highest = v.highest_pending().or_else(|| v.highest_car_call());
+        match highest {
+            Some(f) if f > v.level() => Leg::Up(f),
+            Some(f) => Leg::Down(f),
+            None => Leg::Park,
+        }
+    }
+
+    fn idle(&self, _v: &RunView<'_>) -> Idle {
+        Idle::GoTo(0)
+    }
+}
+
+/// 每层最近的轿厢。简单粗暴，很多老系统就是这么干的。
+#[derive(Debug, Default, Clone)]
+pub struct NearestCar;
+
+impl Assigner for NearestCar {
+    fn name(&self) -> &'static str {
+        "nearest_car"
+    }
+
+    fn assign(&self, v: &SystemView<'_>, call: HallCall) -> Option<CarId> {
+        let mut best: Option<(f64, CarId)> = None;
+        for c in v.cars {
+            if c.stalled {
+                continue;
+            }
+            let d = (c.level as f64 - call.level as f64).abs();
+            // 已经空载且方向相反的稍微加一点惩罚
+            let penalty = if c.load == 0 { 0.0 } else { 1.0 };
+            let score = d + penalty;
+            if best.map_or(true, |(b, _)| score < b) {
+                best = Some((score, c.id));
+            }
+        }
+        best.map(|(_, id)| id)
+    }
+}
+
+/// 轮流派遣。负载天然均衡，但等待时间可能很长。
+///
+/// 游标用 `Cell` 而不是普通字段，这样 `assign` 能保持 `&self` 签名。
+/// 算法内部的可变状态就这么大一处，用不着整个 trait 改成 `&mut self`。
+#[derive(Debug, Default, Clone)]
+pub struct RoundRobin {
+    cursor: std::cell::Cell<usize>,
+}
+
+impl Assigner for RoundRobin {
+    fn name(&self) -> &'static str {
+        "round_robin"
+    }
+
+    fn assign(&self, v: &SystemView<'_>, _call: HallCall) -> Option<CarId> {
+        if v.n_cars == 0 {
+            return None;
+        }
+        let i = self.cursor.get() % v.n_cars;
+        self.cursor.set(self.cursor.get().wrapping_add(1));
+        Some(i)
+    }
+
+    fn reset(&mut self) {
+        self.cursor.set(0);
+    }
+}
+
+/// 派给预计到达最快的那台。
+#[derive(Debug, Clone)]
+pub struct EtaMin {
+    /// 方向不合的惩罚系数
+    pub dir_penalty: f64,
+}
+
+impl Default for EtaMin {
+    fn default() -> Self {
+        Self { dir_penalty: 30.0 }
+    }
+}
+
+impl Assigner for EtaMin {
+    fn name(&self) -> &'static str {
+        "eta_min"
+    }
+
+    fn assign(&self, v: &SystemView<'_>, call: HallCall) -> Option<CarId> {
+        let mut best: Option<(f64, CarId)> = None;
+        for c in v.cars {
+            if c.stalled {
+                continue;
+            }
+            let dist = (c.level as f64 - call.level as f64).abs();
+            // 方向不合要多跑一段，罚 30 秒
+            let aligned = match (c.dir, call.dir) {
+                (Dir::Up, Dir::Up) | (Dir::Down, Dir::Down) => true,
+                (Dir::None, _) => true,
+                _ => false,
+            };
+            let score = dist * 3.5 + if aligned { 0.0 } else { self.dir_penalty };
+            if best.map_or(true, |(b, _)| score < b) {
+                best = Some((score, c.id));
+            }
+        }
+        best.map(|(_, id)| id)
+    }
+}
+
+/// 到达时间加载客惩罚，还会预判「到那一层时是不是已经挤满」。
+///
+/// 预判挤满是它比 `eta_min` 强的地方。见 `docs/DISPATCH_API.md` 第 4.1 节。
+#[derive(Debug, Clone)]
+pub struct LoadAwareEta {
+    /// 每超载一人的惩罚秒数
+    pub load_penalty: f64,
+    /// 预判会挤满时的额外惩罚
+    pub full_penalty: f64,
+    /// 方向不合的惩罚
+    pub dir_penalty: f64,
+    /// 名下每条待办外呼的惩罚。这是负载均衡的关键项
+    pub backlog_penalty: f64,
+}
+
+impl Default for LoadAwareEta {
+    fn default() -> Self {
+        Self { load_penalty: 12.0, full_penalty: 40.0, dir_penalty: 25.0, backlog_penalty: 8.0 }
+    }
+}
+
+impl Assigner for LoadAwareEta {
+    fn name(&self) -> &'static str {
+        "load_aware_eta"
+    }
+
+    fn assign(&self, v: &SystemView<'_>, call: HallCall) -> Option<CarId> {
+        let mut best: Option<(f64, CarId)> = None;
+        for c in v.cars {
+            if c.stalled {
+                continue;
+            }
+            let dist = (c.level as f64 - call.level as f64).abs();
+            let aligned = match (c.dir, call.dir) {
+                (Dir::Up, Dir::Up) | (Dir::Down, Dir::Down) | (Dir::None, _) => true,
+                _ => false,
+            };
+            // 预判：到那层时这一趟会卸掉多少人
+            let predicted_free = c.capacity.saturating_sub(c.load);
+            let will_be_full = predicted_free == 0;
+            // 名下已有的外呼越多，越不该再压给它。
+            // 少了这一项，两台同位置的轿厢评分完全相同，
+            // 而取 min 的写法永远偏向第一台，于是所有活都堆到同一台车上。
+            let backlog = c.pending_calls as f64 * self.backlog_penalty;
+            let mut score = dist * 3.0 + c.load_ratio() * self.load_penalty + backlog;
+            if will_be_full {
+                score += self.full_penalty;
+            }
+            if !aligned {
+                score += self.dir_penalty;
+            }
+            if best.map_or(true, |(b, _)| score < b) {
+                best = Some((score, c.id));
+            }
+        }
+        best.map(|(_, id)| id)
+    }
+}
+
+/// 支持呼叫重分配的派梯。
+///
+/// 这是 `docs/MODEL.md` 第 8.4 节那个场景的正解。一台轿厢卡在超载僵局里，
+/// 它名下那些未服务的外呼通常没有第二台会去接，因为派梯关系是早先建立的。
+/// 这个包装器发现某台轿厢长时间没有推进，就把任务改派给别人。
+#[derive(Debug, Clone)]
+pub struct RescueWrapper<A> {
+    /// 内层的派梯算法
+    pub inner: A,
+    /// 僵局超过多少秒就开始救
+    pub threshold_s: f64,
+    pub rescued: u64,
+}
+
+impl<A: Assigner> RescueWrapper<A> {
+    pub fn new(inner: A) -> Self {
+        Self { inner, threshold_s: 60.0, rescued: 0 }
+    }
+}
+
+impl<A: Assigner> Assigner for RescueWrapper<A> {
+    fn name(&self) -> &'static str {
+        "with_rescue"
+    }
+
+    fn assign(&self, v: &SystemView<'_>, call: HallCall) -> Option<CarId> {
+        self.inner.assign(v, call)
+    }
+
+    fn reassign(&self, v: &SystemView<'_>, owned: &mut [Option<CarId>]) {
+        self.inner.reassign(v, owned);
+        if v.cars.iter().any(|c| c.stalled && c.stall_for > self.threshold_s) {
+            // 找出所有指向僵死轿厢的外呼，改派给最闲的一台
+            let victims: Vec<usize> = owned
+                .iter()
+                .enumerate()
+                .filter(|(_, o)| o.is_some_and(|id| v.cars[id].stalled))
+                .map(|(i, _)| i)
+                .collect();
+            for i in victims {
+                let free: Vec<CarId> = v
+                    .cars
+                    .iter()
+                    .filter(|c| !c.stalled)
+                    .map(|c| c.id)
+                    .collect();
+                if let Some(&target) = free.iter().min_by_key(|&&id| v.cars[id].load) {
+                    owned[i] = Some(target);
+                }
+            }
+        }
+    }
+
+    fn reset(&mut self) {
+        self.inner.reset();
+    }
+}
+
+/// 上下客的默认规则，就是 `docs/MODEL.md` 第 5.5 节那套。
+#[derive(Debug, Clone)]
+pub struct DefaultBoarding {
+    pub cfg: BoardCfg,
+}
+
+impl Default for DefaultBoarding {
+    fn default() -> Self {
+        Self { cfg: BoardCfg::default() }
+    }
+}
+
+impl Boarding for DefaultBoarding {
+    fn name(&self) -> &'static str {
+        "default"
+    }
+
+    fn admit_one(&self, s: &AdmitSample, tol: f64) -> Verdict {
+        if s.free_slots == 0 {
+            return Verdict::NoSpace;
+        }
+        // 只处理两端确定的情况，中间地带交给引擎掷骰子。
+        // 引擎拿到 accept_prob 的值之后抽一次签，比在这里硬判要准。
+        if self.cfg.accept_prob(s.load_ratio, tol, s.waited_s) <= 0.0 {
+            Verdict::Declined
+        } else {
+            Verdict::Admit
+        }
+    }
+}
+
+impl DefaultBoarding {
+    /// 给出这位乘客愿意上来的概率。引擎拿它掷骰子。
+    pub fn accept_prob(&self, s: &AdmitSample, tol: f64) -> f64 {
+        if s.free_slots == 0 {
+            return 0.0;
+        }
+        self.cfg.accept_prob(s.load_ratio, tol, s.waited_s)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::policy::{CarBrief, Router as _, RunView};
+
+    static EMPTY_CARS: [CarBrief; 0] = [];
+    static EMPTY_CALLS: [HallCall; 0] = [];
+    static EMPTY_Q: [u32; 0] = [];
+
+    fn rv(at: f32, dir: Dir, mine: Vec<HallCall>, car_calls: Vec<i16>, load: usize) -> RunView<'static> {
+        RunView {
+            now: 0.0,
+            car: 0,
+            at_level: at,
+            heading: dir,
+            load,
+            capacity_rated: 13,
+            capacity_crush: 17,
+            load_kg: load as f32 * 64.0,
+            car_calls,
+            mine,
+            system: SystemView {
+                now: 0.0,
+                cars: &EMPTY_CARS,
+                pending: &EMPTY_CALLS,
+                all_calls: &EMPTY_CALLS,
+                queue_len: &EMPTY_Q,
+                top_level: 33,
+                n_cars: 0,
+            },
+            floor_height: 3.0,
+        }
+    }
+
+    fn call(level: i16, dir: Dir) -> HallCall {
+        HallCall { id: level as u32, level, dir, owner: Some(0), waiting: 1 }
+    }
+
+    /// 上行时只接上行外呼，同向没人了就反向。
+    #[test]
+    fn collective_scan_goes_up_first() {
+        let v = rv(5.0, Dir::Up, vec![call(20, Dir::Up)], vec![], 0);
+        assert!(CollectiveScan.should_stop(&rv(20.0, Dir::Up, vec![call(20, Dir::Up)], vec![], 0)));
+        assert!(!CollectiveScan.should_stop(&rv(12.0, Dir::Up, vec![call(20, Dir::Up)], vec![], 0)));
+        assert_eq!(CollectiveScan.next_leg(&v), Leg::Up(20));
+    }
+
+    #[test]
+    fn collective_scan_reverses_when_no_up_work() {
+        // 上行但只有下行任务，应当立刻反向
+        let v = rv(5.0, Dir::Up, vec![call(2, Dir::Down)], vec![], 0);
+        assert_eq!(CollectiveScan.next_leg(&v), Leg::Down(2));
+    }
+
+    /// 有人要出去的那一层一定要停，哪怕没有外呼。
+    #[test]
+    fn always_stops_where_people_exit() {
+        let v = rv(8.0, Dir::Up, vec![], vec![8, 20], 2);
+        assert!(CollectiveScan.should_stop(&v));
+    }
+
+    /// 载客率到阈值之后满载直驶，但有人要出去还是要停。
+    #[test]
+    fn selective_bypasses_calls_when_full() {
+        let sc = SelectiveCollective { bypass_ratio: 0.8 };
+        // 13 人的轿厢装了 11 人，载客率 0.846，超过阈值
+        let full = rv(12.0, Dir::Up, vec![call(12, Dir::Up)], vec![], 11);
+        assert!(!sc.should_stop(&full), "满载直驶时不该停");
+        // 但这层有人要出去
+        let exiting = rv(12.0, Dir::Up, vec![], vec![12], 11);
+        assert!(sc.should_stop(&exiting), "有人下车时必须停");
+    }
+
+    #[test]
+    fn selective_below_threshold_behaves_like_collective() {
+        let sc = SelectiveCollective { bypass_ratio: 0.8 };
+        let v = rv(12.0, Dir::Up, vec![call(12, Dir::Up)], vec![], 3);
+        assert!(sc.should_stop(&v));
+    }
+
+    /// 下行扫描：上行途中只在最高任务层停。
+    #[test]
+    fn sweep_only_stops_at_top_on_the_way_up() {
+        let s = DownPeakSweep;
+        let mine = vec![call(33, Dir::Up), call(20, Dir::Down)];
+        // 到了最高任务层要停
+        assert!(s.should_stop(&rv(33.0, Dir::Up, mine.clone(), vec![], 0)), "最高任务层要停");
+        // 中途不停，哪怕那一层也有下行任务
+        assert!(!s.should_stop(&rv(28.0, Dir::Up, mine.clone(), vec![], 0)), "中途不停");
+        // 早高峰全是下行任务时，上行接人也该去最高的那层
+        let down_only = vec![call(30, Dir::Down), call(12, Dir::Down)];
+        assert!(s.should_stop(&rv(30.0, Dir::Up, down_only.clone(), vec![], 0)));
+        assert!(!s.should_stop(&rv(20.0, Dir::Up, down_only, vec![], 0)));
+    }
+
+    #[test]
+    fn sweep_serves_down_calls_on_the_way_down() {
+        let s = DownPeakSweep;
+        let v = rv(20.0, Dir::Down, vec![call(20, Dir::Down)], vec![], 0);
+        assert!(s.should_stop(&v));
+    }
+
+    /// 把传入的 Vec 泄漏成 `'static`，测试专用。
+    /// 这样构造出来的 `SystemView` 不会有借用问题。
+    fn system(cars: Vec<CarBrief>, pending: Vec<HallCall>) -> SystemView<'static> {
+        let cars: &'static [CarBrief] = Box::leak(cars.into_boxed_slice());
+        let pending: &'static [HallCall] = Box::leak(pending.into_boxed_slice());
+        SystemView {
+            now: 0.0,
+            cars,
+            pending,
+            all_calls: pending,
+            queue_len: &EMPTY_Q,
+            top_level: 33,
+            n_cars: cars.len(),
+        }
+    }
+
+    fn brief(id: CarId, level: f32, dir: Dir, load: usize, stalled: bool) -> CarBrief {
+        CarBrief {
+            id,
+            level,
+            dir,
+            load,
+            capacity: 13,
+            pending_calls: 0,
+            stalled,
+            stall_for: if stalled { 120.0 } else { 0.0 },
+        }
+    }
+
+    #[test]
+    fn nearest_car_picks_the_closest() {
+        let v = system(vec![brief(0, 3.0, Dir::None, 0, false), brief(1, 28.0, Dir::None, 0, false)], vec![]);
+        assert_eq!(NearestCar.assign(&v, call(5, Dir::Down)), Some(0));
+        assert_eq!(NearestCar.assign(&v, call(30, Dir::Down)), Some(1));
+    }
+
+    /// 卡死的轿厢不该被派到新活。
+    #[test]
+    fn stalled_car_is_never_assigned() {
+        let v = system(vec![brief(0, 5.0, Dir::None, 0, true), brief(1, 6.0, Dir::None, 0, false)], vec![]);
+        assert_eq!(NearestCar.assign(&v, call(5, Dir::Down)), Some(1));
+        assert_eq!(EtaMin::default().assign(&v, call(5, Dir::Down)), Some(1));
+    }
+
+    /// 载客惩罚让 `load_aware_eta` 偏离纯就近。
+    #[test]
+    fn load_aware_prefers_empty_car() {
+        let v = system(
+            vec![brief(0, 5.0, Dir::None, 12, false), brief(1, 7.0, Dir::None, 0, false)],
+            vec![],
+        );
+        // 两台都很近，但 0 号满了
+        assert_eq!(NearestCar.assign(&v, call(5, Dir::Down)), Some(0));
+        assert_eq!(LoadAwareEta::default().assign(&v, call(5, Dir::Down)), Some(1));
+    }
+
+    /// 红线所在：不救活的派梯会让外呼一直挂在卡死的车上。
+    #[test]
+    fn rescue_wrapper_reassigns_away_from_stalled_car() {
+        let mut owned = vec![Some(0), None, Some(0)];
+        let v = system(
+            vec![brief(0, 10.0, Dir::None, 13, true), brief(1, 12.0, Dir::None, 2, false)],
+            vec![],
+        );
+        let wrapper = RescueWrapper::new(NearestCar);
+        wrapper.reassign(&v, &mut owned);
+        // 原本指向卡死 0 号的两条都该被救走
+        assert_eq!(owned[0], Some(1));
+        assert_eq!(owned[2], Some(1));
+    }
+
+    /// 不救活的派梯什么都不做，这是两种算法的差别所在。
+    #[test]
+    fn plain_assigner_leaves_calls_on_stalled_car() {
+        let mut owned = vec![Some(0), None, Some(0)];
+        let v = system(
+            vec![brief(0, 10.0, Dir::None, 13, true), brief(1, 12.0, Dir::None, 2, false)],
+            vec![],
+        );
+        NearestCar.reassign(&v, &mut owned);
+        assert_eq!(owned[0], Some(0), "朴素派梯不会救");
+        assert_eq!(owned[2], Some(0));
+    }
+
+    #[test]
+    fn boarding_reports_no_space_before_declined() {
+        let b = DefaultBoarding::default();
+        let full = AdmitSample { load_ratio: 1.0, free_slots: 0, waited_s: 0.0, weight_ratio: 1.0 };
+        assert_eq!(b.admit_one(&full, 0.5), Verdict::NoSpace);
+        // 有位子且不挤
+        let loose = AdmitSample { load_ratio: 0.5, free_slots: 6, waited_s: 0.0, weight_ratio: 0.4 };
+        assert_eq!(b.admit_one(&loose, 1.0), Verdict::Admit);
+        // 很挤、最不情愿、刚到，概率压到 0
+        let tight = AdmitSample { load_ratio: 1.0, free_slots: 1, waited_s: 0.0, weight_ratio: 1.0 };
+        assert_eq!(b.admit_one(&tight, 1.0), Verdict::Declined);
+        // 中间地带 admit_one 说可以，但概率很低，由引擎掷骰子决定
+        let edge = AdmitSample { load_ratio: 0.95, free_slots: 1, waited_s: 0.0, weight_ratio: 0.9 };
+        assert_eq!(b.admit_one(&edge, 1.0), Verdict::Admit);
+        assert!(b.accept_prob(&edge, 1.0) <= 0.25, "边缘状态概率应当很低，实际 {}", b.accept_prob(&edge, 1.0));
+        // 等久了概率回升
+        let waited = AdmitSample { load_ratio: 0.95, free_slots: 1, waited_s: 300.0, weight_ratio: 0.9 };
+        assert!(b.accept_prob(&waited, 1.0) > b.accept_prob(&edge, 1.0), "等久了更可能挤上来");
+    }
+
+    #[test]
+    fn round_robin_cycles_and_resets() {
+        let mut a = RoundRobin::default();
+        let v = system(vec![brief(0, 0.0, Dir::None, 0, false), brief(1, 0.0, Dir::None, 0, false)], vec![]);
+        assert_eq!(a.assign(&v, call(5, Dir::Down)), Some(0));
+        assert_eq!(a.assign(&v, call(5, Dir::Down)), Some(1));
+        assert_eq!(a.assign(&v, call(5, Dir::Down)), Some(0));
+        a.reset();
+        assert_eq!(a.assign(&v, call(5, Dir::Down)), Some(0));
+    }
+
+    /// 每个内建算法的名字都要唯一，注册表靠它。
+    #[test]
+    fn router_names_are_unique() {
+        let mut names: Vec<&str> = Vec::new();
+        names.push(CollectiveScan.name());
+        names.push(SelectiveCollective::default().name());
+        names.push(DownPeakSweep.name());
+        let mut sorted = names.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(sorted.len(), names.len(), "算法名撞车了");
+    }
+}

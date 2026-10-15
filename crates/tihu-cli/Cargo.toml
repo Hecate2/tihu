@@ -1,0 +1,12 @@
+[package]
+name = "tihu-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "tihu"
+path = "src/main.rs"
+
+[dependencies]
+tihu-core = { path = "../tihu-core" }
