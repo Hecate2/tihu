@@ -3,9 +3,12 @@ name = "tihu-wasm"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+description = "梯户模拟器的网页绑定。配置 JSON 进，报告 JSON 出"
 
 [lib]
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-tihu-core = { path = "../tihu-core" }
+tihu-core = { path = "../tihu-core", features = ["serde"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
