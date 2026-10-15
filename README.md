@@ -19,26 +19,43 @@
 
 ## 现在的进度
 
-**内核已经能用，外壳还没写。** 这句话必须写在最前面，免得你照着下面的命令敲了
-半天发现没有那条命令。
+**内核和网页都能跑，命令行还是空壳。** 这句话必须写在最前面，免得你照着下面的
+命令敲了半天发现没有那条命令。
 
 | 部分 | 状态 |
 | --- | --- |
 | 仿真内核 `tihu-core` | 能跑。运动学、客流、停靠、挤梯、走楼梯、超载死锁、分区停靠都在 |
 | 命令行 `tihu-cli` | 空壳。`run`、`sweep`、`bench`、`evolve` 都还没写 |
-| 网页绑定 `tihu-wasm` | 空壳 |
-| 网页 `web/` | 空目录 |
+| 网页绑定 `tihu-wasm` | 能跑。手写 ABI，配置 JSON 进、报告 JSON 出 |
+| 网页 `web/` | 能跑。四个文件，无框架无依赖 |
 | 基准 `benches/` | 空 |
-| 验收脚本 `harness/` | 空 |
+| 验收脚本 `harness/` | 有一个 node 冒烟脚本 `tools/smoke.js` |
 
-想现在就看数字，只能跑内核自带的例子：
+
+### 在浏览器里玩
+
+```bash
+make single          # 产出 dist/tihu.html
+open dist/tihu.html  # 断网也能开，双击也行
+```
+
+拖几个滑块，结果几秒出来。预设按钮切换楼盘，URL 里带配置，发给别人对方打开就是
+同一栋楼。
+
+### 在命令行跑一次扫描
+
+```bash
+cargo run --release --example sweep -p tihu-core
+```
+
+七组参数扫描，每组五个种子取平均，输出的表可以直接贴进文档。全部数字与解读见
+[`docs/SIMULATE.md`](docs/SIMULATE.md)。
+
+内核自带的另一个例子跑四栋楼各一次早高峰，只打印一行摘要：
 
 ```bash
 cargo run --release --example repro -p tihu-core
 ```
-
-它会跑四栋楼各一次早高峰，把耗时、上梯人数、平均等待、P90 等待、往返时间打印
-出来。这是目前唯一能跑的东西。
 
 <!-- TODO: 演示站点的地址填到这里 -->
 
@@ -177,6 +194,11 @@ impl Router for MyRouter {
 影响。模型里每个默认值都标了出处，查不到出处的都写了「待标定」，详见
 [`docs/MODEL.md`](docs/MODEL.md)。
 
+**有一处已知偏悲观的地方。** 需求集中在单独一层时，比如晚高峰所有人挤在主入口层，
+那里始终只有一条外呼，而一条外呼只挂在一台轿厢名下。多出来的车停在旁边不参与
+分担。实测那栋三十三层的楼配到六台梯，晚高峰平均等梯几乎没变化。诊断与改法记在
+[`docs/PLAN.md`](docs/PLAN.md) 的 P4.5。早高峰的数字不受影响，可以用。
+
 想让它贴近某一栋具体的楼，需要在现场掐表反推参数。这个功能还没有写。
 
 ---
@@ -195,6 +217,7 @@ impl Router for MyRouter {
 | --- | --- |
 | 仓库红线与工作约定 | [`AGENTS.md`](AGENTS.md) |
 | 某个参数代表什么 | [`docs/MODEL.md`](docs/MODEL.md) |
+| 怎么扫参数、怎么读结果 | [`docs/SIMULATE.md`](docs/SIMULATE.md) |
 | 代码怎么分层 | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) |
 | 怎么写调度算法 | [`docs/DISPATCH_API.md`](docs/DISPATCH_API.md) |
 | 多快 | [`docs/PERFORMANCE.md`](docs/PERFORMANCE.md) |
