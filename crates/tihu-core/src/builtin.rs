@@ -65,12 +65,21 @@ impl crate::policy::Router for CollectiveScan {
 
 /// 集选加满载直驶。载客率到阈值之后不再响应外呼，直接掠过。
 ///
-/// 这一条直接对应 `docs/MODEL.md` 第 6.2 节的因果：多按出来的那条无用外呼
-/// 会把一台轿厢拉去跑冤枉路，满载直驶能挡掉一部分。
-#[derive(Debug, Default, Clone)]
+/// 这一条直接对应 `docs/MODEL.md` 第 5.2 与 5.3 节的因果：多按出来的那条无用
+/// 外呼会把一台轿厢拉去跑冤枉路，满载直驶能挡掉一部分。
+#[derive(Debug, Clone)]
 pub struct SelectiveCollective {
     /// 超过这个载客率就开始直驶
     pub bypass_ratio: f64,
+}
+
+impl Default for SelectiveCollective {
+    fn default() -> Self {
+        // TODO(calibration) 满载直驶的触发点。行业上常见是按额定载重的八成上下
+        // 起跳，这里先按载客率 0.8。填 0 会让它整趟都不应答外呼，等于把这个
+        // 算法废掉，所以默认值不能取 0。
+        Self { bypass_ratio: 0.8 }
+    }
 }
 
 impl crate::policy::Router for SelectiveCollective {
