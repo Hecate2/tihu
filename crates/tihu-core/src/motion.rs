@@ -10,6 +10,8 @@
 /// `v_max` 是该方向的极限速度。`a_acc` 与 `a_dec` 可以不同，`j_acc` 与
 /// `j_dec` 也可以不同，这十个量都能单独设置。
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(default))]
 pub struct MotionProfile {
     /// 该方向的极限速度，单位 m/s
     pub v_max: f32,
@@ -209,6 +211,8 @@ pub fn time_at_distance(dist: f64, p: MotionProfile, d: f64) -> f64 {
 ///
 /// 启停的加减速损耗不在这里算，它已经包含在 S 曲线里了。见 `docs/MODEL.md` 第 3.6 节。
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(default))]
 pub struct DoorTiming {
     /// 开门耗时
     pub open_s: f32,

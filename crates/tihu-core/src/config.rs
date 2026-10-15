@@ -13,6 +13,8 @@ pub const LOBBY: i16 = 1;
 
 /// 一栋楼。
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(default))]
 pub struct Building {
     /// 最高层号。层号 1 是主入口层，所以 19 表示上面还有 18 个住宅层
     pub top_level: i16,
@@ -120,6 +122,8 @@ impl Building {
 
 /// 体重分布里一个分量的身份。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 pub enum WeightKind {
     /// 成年男性
     AdultMale,
@@ -133,6 +137,7 @@ pub enum WeightKind {
 
 /// 体重分布的一个峰。
 #[derive(Debug, Clone, Copy)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct WeightPeak {
     pub kind: WeightKind,
     /// 这个峰占多少比例，不必归一化
@@ -152,6 +157,8 @@ pub struct WeightPeak {
 /// 女性约 58.1 公斤。对数正态的中位数略低于均值，所以这里取 68 与 56。
 /// 再各自加一份衣物与随身物品的固定余量。**具体年份与分布形态待核。**
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(default))]
 pub struct WeightMix {
     /// 各分量
     pub peaks: Vec<WeightPeak>,
@@ -207,6 +214,8 @@ impl WeightMix {
 /// 高层住宅的梯群常常有分区：一部只停单层，一部只停双层，或者高低区分开。
 /// 这里给出几种写起来方便的写法，可以互相组合。
 #[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 pub enum StopSpec {
     /// 全部楼层
     All,
@@ -270,6 +279,8 @@ impl StopSpec {
 
 /// 一台轿厢的规格。
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(default))]
 pub struct CarSpec {
     /// 额定载重，公斤
     pub rated_load_kg: f32,
@@ -311,6 +322,8 @@ impl CarSpec {
 
 /// 客流模式。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 pub enum Pattern {
     /// 早高峰下行
     MorningDown,
@@ -348,6 +361,7 @@ impl Pattern {
 ///
 /// 医院里就是「三层门诊去十二层手术室」这种。`share` 不必归一化。
 #[derive(Debug, Clone, Copy)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Flow {
     pub from: i16,
     pub to: i16,
@@ -362,6 +376,8 @@ impl Flow {
 
 /// 客流配置。
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(default))]
 pub struct Traffic {
     pub pattern: Pattern,
     /// 高峰窗口长度，秒
@@ -407,6 +423,8 @@ impl Default for Traffic {
 
 /// 乘客的按键策略。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 pub enum Strategy {
     /// 只按真实方向
     Honest,
@@ -441,6 +459,8 @@ impl Strategy {
 
 /// 各策略占多大比例，会被归一化。
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(default))]
 pub struct StrategyMix {
     pub honest: f64,
     pub press_both: f64,
@@ -501,6 +521,8 @@ impl StrategyMix {
 ///
 /// 耗时与费力仍然要算，因为它们决定住户在「打算走」之后会不会反悔。
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(default))]
 pub struct Stairs {
     /// 是否启用
     pub enabled: bool,
@@ -589,6 +611,8 @@ impl Stairs {
 
 /// 挤梯判据的配置。
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(default))]
 pub struct Boarding {
     /// 载客率低于这条线人人都上，不掷骰子
     pub soft_start_ratio: f64,
@@ -650,6 +674,8 @@ impl Boarding {
 
 /// 呼叫面板形式。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 pub enum CallSurface {
     /// 并联群控，共用一套上下按钮。一次按键一个外呼
     GroupSingle,
@@ -676,6 +702,8 @@ impl CallSurface {
 
 /// 超载死锁的配置。默认关闭。
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(default))]
 pub struct Overload {
     /// 是否启用。默认关闭，因为它极其罕见
     pub enabled: bool,
@@ -709,6 +737,8 @@ impl Default for Overload {
 
 /// 仿真控制。
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(default))]
 pub struct Sim {
     /// 根种子
     pub seed: u64,
@@ -732,6 +762,8 @@ impl Default for Sim {
 
 /// 一份完整的仿真配置。
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(default))]
 pub struct Config {
     pub building: Building,
     /// 每台轿厢一份规格
@@ -1300,5 +1332,39 @@ mod tests {
         assert_eq!(c.building.residents_at(2), 17);
         assert_eq!(c.building.total_residents(), 33 * 17);
         assert_eq!(c.expected_trips(), (33.0 * 17.0 * 0.55) as usize);
+    }
+
+    /// 配置往返 JSON 必须一模一样。网页传的就是这份 JSON，
+    /// 一旦某个字段漏了 serde 属性，这里立刻会红。
+    #[cfg(feature = "serde")]
+    #[test]
+    fn config_roundtrips_through_json() {
+        let mut c = preset("hospital").unwrap();
+        c.building.basement_levels = 2;
+        c.cars[0].stops = StopSpec::parity(true);
+        c.cars[1].stops = StopSpec::zone(2, 12);
+        c.cars[2].stops = StopSpec::union(vec![StopSpec::Odd, StopSpec::list([1, 2, 20])]);
+        c.cars[0].initial_level = -1;
+        c.overload.enabled = true;
+        c.call_surface = CallSurface::PerCarPanel;
+        c.strategy =
+            StrategyMix { honest: 0.5, press_both: 0.3, press_up_only: 0.1, multi_call: 0.1 };
+
+        let a = serde_json::to_string(&c).unwrap();
+        let back: Config = serde_json::from_str(&a).unwrap();
+        let b = serde_json::to_string(&back).unwrap();
+        assert_eq!(a, b, "配置往返 JSON 不一致");
+    }
+
+    /// 只给一小部分字段也要能建出完整配置，缺的都走默认值。
+    #[cfg(feature = "serde")]
+    #[test]
+    fn partial_json_falls_back_to_defaults() {
+        let j = r#"{"building":{"top_level":7,"units_per_floor":[0,4,4,4,4,4,4]},"sim":{"seed":5}}"#;
+        let c: Config = serde_json::from_str(j).unwrap();
+        assert_eq!(c.building.top_level, 7);
+        assert_eq!(c.sim.seed, 5);
+        assert!((c.building.floor_height - 3.0).abs() < 1e-6, "没给的字段应当走默认值");
+        assert_eq!(c.cars.len(), 2, "没给轿厢表时应当有两台默认轿厢");
     }
 }

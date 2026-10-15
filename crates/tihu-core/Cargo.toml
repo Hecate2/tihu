@@ -7,3 +7,10 @@ license.workspace = true
 description = "梯户模拟器的仿真内核。无 IO，无网络，无外部依赖"
 
 [dependencies]
+serde = { version = "1", features = ["derive"], optional = true }
+serde_json = { version = "1", optional = true }
+
+[features]
+# 让配置结构体可序列化成 JSON。内核自身不需要，只有网页绑定与配置往返测试用。
+# 关掉时内核仍然零外部依赖，这是 docs/ARCHITECTURE.md 第 7.2 节的口径。
+serde = ["dep:serde", "dep:serde_json"]
