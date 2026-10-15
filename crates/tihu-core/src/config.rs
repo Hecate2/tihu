@@ -492,6 +492,13 @@ pub struct Boarding {
     pub impatience_gain: f64,
     /// 物理极限相对额定人数的倍数
     pub crush_factor: f64,
+    /// 物理载重上限相对额定载重的倍数。超过这个重量就再也进不来人。
+    ///
+    /// 全身重量是硬约束，人数只是乘客自己的心理尺度。两者各管一头：
+    /// 乘客看人数决定愿不愿意挤，轿厢看千克决定还装不装得下。
+    ///
+    /// 默认 1.10 比报警线 1.05 高，这样「先挤到报警线、再僵住」的因果链才成立
+    pub crush_load_ratio: f64,
     /// 载客率达到这条就开始满载直驶
     pub bypass_load_ratio: f64,
 }
@@ -504,6 +511,7 @@ impl Default for Boarding {
             wait_ref_s: 120.0,
             impatience_gain: 0.4,
             crush_factor: 1.25,
+            crush_load_ratio: 1.10, // TODO(calibration) 对照 GB 7588 超载保护动作值
             bypass_load_ratio: 0.80,
         }
     }
@@ -513,6 +521,11 @@ impl Boarding {
     /// 物理极限人数。
     pub fn capacity_crush(&self, capacity_rated: usize) -> usize {
         ((capacity_rated as f64 * self.crush_factor).ceil() as usize).max(capacity_rated)
+    }
+
+    /// 物理极限载重，千克。超过就再也进不来人。
+    pub fn load_crush_kg(&self, rated_load_kg: f64) -> f64 {
+        rated_load_kg * self.crush_load_ratio.max(1.0)
     }
 
     /// 某位乘客这次愿不愿意挤上来。见 `docs/MODEL.md` 第 5.5.2 节。
