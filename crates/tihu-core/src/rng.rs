@@ -230,22 +230,10 @@ impl Streams {
         self.gens[Self::idx(s)].chance(p)
     }
 
-    /// 抽一个服从对数正态的体重。
-    #[inline]
-    pub fn weight(&mut self, median: f64, cv: f64) -> f64 {
-        self.gens[Self::idx(Stream::Weight)].lognormal(median, cv)
-    }
-
     /// 抽一个 `[lo, hi)` 区间内的 `f64`。
     #[inline]
     pub fn range(&mut self, s: Stream, lo: f64, hi: f64) -> f64 {
         self.gens[Self::idx(s)].range_f64(lo, hi)
-    }
-
-    /// 抽一个服从对数正态的体重。走体重流。
-    #[inline]
-    pub fn gens_for_weight(&mut self, median: f64, cv: f64) -> f64 {
-        self.weight(median, cv)
     }
 
     /// 抽一个拒挤度。
@@ -258,6 +246,16 @@ impl Streams {
     #[inline]
     pub fn lognormal(&mut self, median: f64, cv: f64) -> f64 {
         self.gens[Self::idx(Stream::Patience)].lognormal(median, cv)
+    }
+
+    /// 从多分量体重分布里抽一个体重，公斤。
+    ///
+    /// 选分量与抽具体数值都走体重流，不新开流。`force_child` 为真时锁定小孩那一峰。
+    #[inline]
+    pub fn body_weight(&mut self, mix: &crate::config::WeightMix, force_child: bool) -> f64 {
+        let g = &mut self.gens[Self::idx(Stream::Weight)];
+        let (median, cv) = mix.pick(g.next_f64(), force_child);
+        g.lognormal(median, cv.max(0.01)) + mix.carried_kg.max(0.0)
     }
 }
 

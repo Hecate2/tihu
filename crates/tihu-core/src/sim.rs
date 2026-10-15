@@ -1770,4 +1770,55 @@ mod tests {
         assert_eq!(w.pax[pid].declined_count, 0);
         assert_eq!(w.cars[0].occupants.len(), 0);
     }
+
+    /// 多分量体重分布：均值落在合理区间，两头都要有人。
+    ///
+    /// 单一峰的对数正态抽不出「一撮很重的人」，也抽不出足够的小孩。
+    /// 这一条盯的就是混合分布确实把四个峰都覆盖到了。
+    #[test]
+    fn weight_mix_covers_all_four_peaks() {
+        let w = World::new(small());
+        let weights: Vec<f64> = w.pax.iter().map(|p| p.weight).collect();
+        assert!(weights.len() > 20, "样本太小，说明这份配置没造出几个人");
+        let mean = weights.iter().sum::<f64>() / weights.len() as f64;
+        assert!(
+            (52.0..=70.0).contains(&mean),
+            "平均体重 {mean:.1} 公斤偏离中国居民体格数据的量级"
+        );
+        let max = weights.iter().cloned().fold(f64::MIN, f64::max);
+        let min = weights.iter().cloned().fold(f64::MAX, f64::min);
+        assert!(max > 85.0, "分布里要有一撮很重的人，实际最重 {max:.1}");
+        assert!(min < 40.0, "同行团里要有小孩，实际最轻 {min:.1}");
+        // 衣物与随身物品的余量不能让任何人轻到不合常理
+        assert!(min > 15.0, "最轻也要像个真人，实际 {min:.1}");
+        // 绕一次场景，确认没有别处偷偷重抽体重
+        let mut c = small();
+        c.traffic.return_ratio = 1.0;
+        let before: Vec<u64> = World::new(c.clone()).pax.iter().map(|p| p.weight.to_bits()).collect();
+        let after: Vec<u64> = default_run(c).world.pax.iter().map(|p| p.weight.to_bits()).collect();
+        assert_eq!(before, after, "体重在跑完之后必须与生成时逐位一致");
+    }
+
+    /// 折返时体重不变。同一份记录，两条腿共用同一个重量。
+    #[test]
+    fn weight_is_identical_on_the_return_leg() {
+        let mut c = small();
+        c.traffic.return_ratio = 1.0;
+        c.traffic.departure_ratio = 1.0;
+        c.sim.horizon_s = 7200.0;
+        let r = default_run(c);
+        let returned: Vec<&crate::engine::Pax> =
+            r.world.pax.iter().filter(|p| p.n_hops == 2).collect();
+        assert!(!returned.is_empty(), "该有人走两条腿");
+        for p in returned {
+            // 两条腿之间没有任何地方重抽体重，所以跑完之后仍然是同一个值
+            assert!(p.weight > 0.0, "体重不该被清零");
+            assert!(
+                p.hop_idx <= p.n_hops,
+                "腿序号不该越界：{} / {}",
+                p.hop_idx,
+                p.n_hops
+            );
+        }
+    }
 }

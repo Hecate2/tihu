@@ -118,6 +118,90 @@ impl Building {
     }
 }
 
+/// 体重分布里一个分量的身份。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WeightKind {
+    /// 成年男性
+    AdultMale,
+    /// 成年女性
+    AdultFemale,
+    /// 小孩
+    Child,
+    /// 很重的人。分布要专门留一撮给他
+    Heavy,
+}
+
+/// 体重分布的一个峰。
+#[derive(Debug, Clone, Copy)]
+pub struct WeightPeak {
+    pub kind: WeightKind,
+    /// 这个峰占多少比例，不必归一化
+    pub share: f64,
+    /// 中位数体重，公斤。对数正态用中位数而不是均值
+    pub median_kg: f64,
+    /// 变异系数
+    pub cv: f64,
+}
+
+/// 体重分布：若干对数正态分量的混合。
+///
+/// 用混合而不是单一分布，是因为真人不是一个峰。成年男性、成年女性、小孩、
+/// 以及少数很重的人，四拨人体重差得远，混在一起会得到一个谁也不像的中间值。
+///
+/// 默认值取自中国居民营养与慢性病状况报告：成年男性平均体重约 69.6 公斤，
+/// 女性约 58.1 公斤。对数正态的中位数略低于均值，所以这里取 68 与 56。
+/// 再各自加一份衣物与随身物品的固定余量。**具体年份与分布形态待核。**
+#[derive(Debug, Clone)]
+pub struct WeightMix {
+    /// 各分量
+    pub peaks: Vec<WeightPeak>,
+    /// 衣物与随身物品的固定增量，公斤
+    pub carried_kg: f64,
+}
+
+impl Default for WeightMix {
+    fn default() -> Self {
+        Self {
+            peaks: vec![
+                WeightPeak { kind: WeightKind::AdultMale, share: 0.38, median_kg: 68.0, cv: 0.15 },
+                WeightPeak { kind: WeightKind::AdultFemale, share: 0.36, median_kg: 56.0, cv: 0.15 },
+                // 小孩占比较小，早高峰跟着大人出门的那一撮
+                WeightPeak { kind: WeightKind::Child, share: 0.18, median_kg: 26.0, cv: 0.22 },
+                // 很重的人。比例小但绝对数不小，是超载报警的主要来源
+                WeightPeak { kind: WeightKind::Heavy, share: 0.06, median_kg: 105.0, cv: 0.18 },
+            ],
+            carried_kg: 2.5, // TODO(calibration) 衣物加随身物品
+        }
+    }
+}
+
+impl WeightMix {
+    /// 抽一个分量，返回它的中位数与变异系数。
+    ///
+    /// `force_child` 为真时直接走小孩那一峰。同行团里带小孩的那几位走这条路径，
+    /// 保证相关性，不让「带小孩的团」变成大人小孩随机混。
+    pub fn pick(&self, u: f64, force_child: bool) -> (f64, f64) {
+        if force_child {
+            if let Some(p) = self.peaks.iter().find(|p| p.kind == WeightKind::Child) {
+                return (p.median_kg, p.cv);
+            }
+        }
+        let total: f64 = self.peaks.iter().map(|p| p.share.max(0.0)).sum();
+        if total <= 0.0 {
+            return (65.0, 0.18);
+        }
+        let target = u * total;
+        let mut acc = 0.0;
+        for p in &self.peaks {
+            acc += p.share.max(0.0);
+            if target < acc {
+                return (p.median_kg, p.cv);
+            }
+        }
+        self.peaks.last().map(|p| (p.median_kg, p.cv)).unwrap_or((65.0, 0.18))
+    }
+}
+
 /// 一台轿厢停靠哪些楼层。
 ///
 /// 高层住宅的梯群常常有分区：一部只停单层，一部只停双层，或者高低区分开。
@@ -583,12 +667,6 @@ pub struct Overload {
     pub stress_growth: f64,
     /// 兜底超时，超时后强制最近门口的人退出
     pub stall_timeout_s: f64,
-    /// 成人体重中位数，公斤
-    pub adult_weight_kg: f64,
-    /// 体重变异系数
-    pub weight_cv: f64,
-    /// 小孩体重中位数，公斤
-    pub child_weight_kg: f64,
 }
 
 impl Default for Overload {
@@ -601,9 +679,6 @@ impl Default for Overload {
             q_other: 0.05,          // TODO(calibration)
             stress_growth: 1.6,     // TODO(calibration)
             stall_timeout_s: 300.0,
-            adult_weight_kg: 64.0,  // TODO(calibration) 国家卫健委居民营养报告
-            weight_cv: 0.18,
-            child_weight_kg: 30.0,
         }
     }
 }
@@ -640,6 +715,8 @@ pub struct Config {
     pub traffic: Traffic,
     pub stairs: Stairs,
     pub boarding: Boarding,
+    /// 乘客体重分布
+    pub weight: WeightMix,
     pub strategy: StrategyMix,
     pub call_surface: CallSurface,
     pub overload: Overload,
@@ -654,6 +731,7 @@ impl Default for Config {
             traffic: Traffic::default(),
             stairs: Stairs::default(),
             boarding: Boarding::default(),
+            weight: WeightMix::default(),
             strategy: StrategyMix::default(),
             call_surface: CallSurface::GroupSingle,
             overload: Overload::default(),
