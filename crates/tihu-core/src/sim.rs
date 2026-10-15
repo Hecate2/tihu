@@ -204,7 +204,17 @@ fn after_event<A: Assigner>(
     assigner.reassign(&svref, &mut owned);
     if before != owned {
         for (i, slot) in owned.iter().enumerate() {
-            w.calls.calls[i].owner = *slot;
+            let live = {
+                let c = &w.calls.calls[i];
+                w.calls
+                    .slots
+                    .get(Call::slot_index(c.level, c.dir, w.basement))
+                    .copied()
+                    .flatten()
+                    == Some(c.id)
+            };
+            // 已经灭灯的外呼不许被重分配复活
+            w.calls.calls[i].owner = if live { *slot } else { None };
         }
     }
     sync_assignments(w);
@@ -276,15 +286,23 @@ fn abandon_to_stairs(w: &mut World, pid: usize, metrics: &mut Metrics) {
 
 
 /// 按每条外呼的 owner 重建各轿厢的待办列表。
+///
+/// 只挂还亮着的外呼。灯的判据是槽位还指着它，这一条同时挡住了已灭的旧记录。
 fn sync_assignments(w: &mut World) {
     for c in &mut w.cars {
         c.assigned.clear();
     }
     for c in &w.calls.calls {
-        if let Some(owner) = c.owner {
-            if owner < w.cars.len() {
-                w.cars[owner].assigned.push(c.id);
-            }
+        let Some(owner) = c.owner else { continue };
+        let live = w
+            .calls
+            .slots
+            .get(Call::slot_index(c.level, c.dir, w.basement))
+            .copied()
+            .flatten()
+            == Some(c.id);
+        if live && owner < w.cars.len() {
+            w.cars[owner].assigned.push(c.id);
         }
     }
 }
@@ -382,7 +400,10 @@ fn prune_calls(w: &mut World) {
     }
 }
 
-/// 灭掉一条外呼的灯：清槽位，并把所有轿厢的待办与预定停靠里的它摘掉。
+/// 灭掉一条外呼的灯：清槽位、清归属，并把所有轿厢的待办与预定停靠里的它摘掉。
+///
+/// **归属也要清。** 只清槽位的话 `sync_assignments` 下一轮会按 `owner` 把它重新
+/// 挂回轿厢的待办表，那台车就会永远停在这一层，开门，没人上，再停，死循环。
 fn kill_call(w: &mut World, level: i16, dir: Dir) {
     if level < -w.basement || level > w.top {
         return;
@@ -390,6 +411,9 @@ fn kill_call(w: &mut World, level: i16, dir: Dir) {
     let slot = Call::slot_index(level, dir, w.basement);
     let Some(cid) = w.calls.slots.get(slot).copied().flatten() else { return };
     w.calls.clear_slot(level, dir);
+    if let Some(c) = w.calls.get_mut(cid) {
+        c.owner = None;
+    }
     for c in &mut w.cars {
         c.assigned.retain(|&a| a != cid);
         c.stops_planned.retain(|&(l, d)| !(l == level && d == dir));
@@ -769,7 +793,7 @@ fn begin_stop<B: Boarding>(
     let total = base + in_t + doors.close_s as f64 + doors.ctrl_resp_s as f64;
     let close_at = w.cars[id].stop_started + total;
 
-    // 满载直驶与幽灵停站的记账
+    // 幽灵停站：开门了却没人上、也没人下，白损失一次停靠开销
     if w.cars[id].last_boarded == 0 && w.cars[id].last_alighted == 0 {
         w.cars[id].ghost_stops += 1;
     }
@@ -986,7 +1010,11 @@ fn try_board_one<B: Boarding>(
     }
     let capacity_rated = w.cfg.cars[id].capacity_rated;
     let crush = w.cfg.boarding.capacity_crush(capacity_rated);
-    let free = capacity_rated.saturating_sub(w.cars[id].occupants.len());
+    // 空位要按物理极限算，不能按额定人数算。
+    //
+    // 按额定算的话轿厢永远坐不满超过铭牌数，拒挤曲线只在额定线以下起作用，
+    // 重量也就永远压不过报警线，红线 6 的超载死锁根本触发不了
+    let free = crush.saturating_sub(w.cars[id].occupants.len());
     let load_ratio = w.cars[id].occupants.len() as f64 / capacity_rated.max(1) as f64;
     let waited = (now - w.pax[pid].t_arrive).max(0.0);
     let sample = AdmitSample {
@@ -1536,5 +1564,82 @@ mod tests {
         c.traffic.departure_ratio = 1.0;
         let r = default_run(c);
         assert_eq!(r.metrics.abandoned, 0, "关掉之后不该有人弃梯");
+    }
+
+    /// 红线 2：上下都按时，多出来的那条呼叫最终变成一次幽灵停站。
+    ///
+    /// 全员上下都按，下行的人手上都会多亮一条上行按键。上行那条没人真的要用，
+    /// 但灯亮着，轿厢一定会来，到了才发现没人上。
+    #[test]
+    fn unwanted_calls_become_ghost_stops() {
+        let mut c = small();
+        c.traffic.departure_ratio = 1.0;
+        c.strategy = crate::config::StrategyMix {
+            honest: 0.0,
+            press_both: 1.0,
+            press_up_only: 0.0,
+            multi_call: 0.0,
+        };
+        let r = default_run(c);
+        assert!(
+            r.metrics.ghost_stops > 0,
+            "上下都按之后应当出现幽灵停站，实际 {}",
+            r.metrics.ghost_stops
+        );
+        assert!(
+            r.metrics.ghost_stops < r.metrics.pax_total * 3,
+            "幽灵停站多得不合理：{} 次，乘客 {} 人",
+            r.metrics.ghost_stops,
+            r.metrics.pax_total
+        );
+    }
+
+    /// 红线 3：挤不上是随机的，车会带着空位开走，两类原因要分开记。
+    #[test]
+    fn crowded_car_leaves_with_empty_seats() {
+        let mut c = Config::default();
+        c.building.top_level = 12;
+        c.building.units_per_floor = vec![8; 12];
+        c.cars = vec![CarSpec::default()];
+        c.traffic.departure_ratio = 1.0;
+        // 把拒挤门槛压低，挤的场面来得更早
+        c.boarding.soft_start_ratio = 0.4;
+        c.stairs.abandon_after_s = 0.0;
+        let r = default_run(c);
+        assert!(r.metrics.pax_with_bypass > 0, "这么挤的楼该有人被跳过");
+        let any_reason = r.world.pax.iter().any(|p| p.declined_count > 0)
+            || r.world.pax.iter().any(|p| p.no_space_count > 0);
+        assert!(any_reason, "被跳过的人该记下原因");
+        // 有人被跳过，却最终被送走了，说明车是带着空位开走的
+        let served_with_bypass = r
+            .world
+            .pax
+            .iter()
+            .filter(|p| p.bypass_count > 0 && p.t_exit > 0.0)
+            .count();
+        assert!(served_with_bypass > 0, "被跳过的人最终也该被送走");
+    }
+
+    /// 红线 6：候梯人数远超运载能力时，超载死锁必须能被触发。
+    #[test]
+    fn overload_stall_can_be_triggered() {
+        let c = crate::config::preset("stress_stalled_car").unwrap();
+        let r = default_run(c);
+        assert!(
+            r.metrics.stalls > 0,
+            "刻意饿死的场景下死锁必须被触发，实际 {} 次",
+            r.metrics.stalls
+        );
+        assert!(r.metrics.stall_seconds > 0.0, "僵持要有累计秒数");
+    }
+
+    /// 超载开关关掉时不产生任何僵局。这是红线 2.7 要求的快路径。
+    #[test]
+    fn overload_off_means_no_stalls() {
+        let c = Config::default();
+        assert!(!c.overload.enabled, "超载默认关闭");
+        let r = default_run(c);
+        assert_eq!(r.metrics.stalls, 0);
+        assert_eq!(r.metrics.stall_seconds, 0.0);
     }
 }
