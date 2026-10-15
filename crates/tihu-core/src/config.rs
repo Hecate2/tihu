@@ -318,6 +318,9 @@ pub enum Pattern {
     EveningUp,
     /// 中午双向
     NoonMixed,
+    /// 层间交通。起终点由 `Traffic::flows` 指定，用来模拟医院、写字楼这类
+    /// 大量发生在楼层之间的客流
+    InterFloor,
 }
 
 impl Pattern {
@@ -326,6 +329,7 @@ impl Pattern {
             Pattern::MorningDown => "morning_down",
             Pattern::EveningUp => "evening_up",
             Pattern::NoonMixed => "noon_mixed",
+            Pattern::InterFloor => "inter_floor",
         }
     }
 
@@ -334,8 +338,25 @@ impl Pattern {
             "morning_down" => Some(Pattern::MorningDown),
             "evening_up" => Some(Pattern::EveningUp),
             "noon_mixed" => Some(Pattern::NoonMixed),
+            "inter_floor" => Some(Pattern::InterFloor),
             _ => None,
         }
+    }
+}
+
+/// 一股指定的层间客流：从 `from` 层去 `to` 层，占全部层间客流的多大比例。
+///
+/// 医院里就是「三层门诊去十二层手术室」这种。`share` 不必归一化。
+#[derive(Debug, Clone, Copy)]
+pub struct Flow {
+    pub from: i16,
+    pub to: i16,
+    pub share: f64,
+}
+
+impl Flow {
+    pub fn new(from: i16, to: i16, share: f64) -> Self {
+        Self { from, to, share }
     }
 }
 
@@ -362,6 +383,8 @@ pub struct Traffic {
     pub return_ratio: f32,
     /// 返程前在目的地停留多久的中位数，秒
     pub return_dwell_s: f64,
+    /// 层间客流表。只在 `Pattern::InterFloor` 下生效
+    pub flows: Vec<Flow>,
 }
 
 impl Default for Traffic {
@@ -377,6 +400,7 @@ impl Default for Traffic {
             child_party_ratio: 0.35, // TODO(calibration) 早高峰要送小孩上学
             return_ratio: 0.05,      // TODO(calibration) 折返拿东西、接送
             return_dwell_s: 900.0,   // TODO(calibration)
+            flows: Vec::new(),
         }
     }
 }
@@ -949,6 +973,37 @@ impl Config {
                 });
             }
         }
+        // 层间客流表里的每一股，起终点都要在楼里，而且要有一台车同时停靠
+        if self.traffic.pattern == Pattern::InterFloor {
+            if self.traffic.flows.is_empty() {
+                v.issues.push(Issue::error(
+                    "no_flows",
+                    "层间交通模式下必须给出至少一股客流".into(),
+                ));
+            }
+            for f in &self.traffic.flows {
+                if f.share < 0.0 {
+                    v.issues.push(Issue::error("flow_share", "客流占比不能是负数".into()));
+                }
+                for level in [f.from, f.to] {
+                    if level < b.lowest_level() || level > b.highest_level() {
+                        v.issues.push(Issue::error(
+                            "flow_level",
+                            format!("层间客流的 {level} 层超出楼的范围"),
+                        ));
+                    } else if !self
+                        .cars
+                        .iter()
+                        .any(|c| c.stops.serves(f.from) && c.stops.serves(f.to))
+                    {
+                        v.issues.push(Issue::error(
+                            "flow_unserved",
+                            format!("没有一台轿厢同时停靠 {} 层与 {} 层", f.from, f.to),
+                        ));
+                    }
+                }
+            }
+        }
         v
     }
 
@@ -1019,6 +1074,19 @@ pub fn preset(name: &str) -> Option<Config> {
             c.traffic.pattern = Pattern::NoonMixed;
             c.traffic.reverse_ratio = 0.5;
         }
+        "hospital" => {
+            // 一栋二十四层的院楼。层号 1 是主入口，2 到 25 是各科室与病区
+            set(&mut c, 24, 4, 3);
+            c.building.persons_per_unit = 3.0;
+            c.traffic.pattern = Pattern::InterFloor;
+            c.traffic.departure_ratio = 0.35;
+            c.traffic.flows = vec![
+                Flow::new(3, 12, 0.30), // 门诊去手术层
+                Flow::new(12, 2, 0.25), // 手术层送回门诊
+                Flow::new(6, 20, 0.25), // 检验去住院病区
+                Flow::new(20, 6, 0.20), // 病区回检验
+            ];
+        }
         _ => return None,
     }
     Some(c)
@@ -1033,6 +1101,7 @@ pub fn preset_names() -> &'static [&'static str] {
         "stress_gaming",
         "stress_stalled_car",
         "stress_mixed_traffic",
+        "hospital",
     ]
 }
 

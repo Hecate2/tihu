@@ -398,6 +398,10 @@ impl World {
         let ret = self.cfg.traffic.return_ratio as f64;
         let evening = matches!(pattern, Pattern::EveningUp);
         let mixed = matches!(pattern, Pattern::NoonMixed);
+        if matches!(pattern, Pattern::InterFloor) {
+            self.build_inter_floor(&mut rng, dep, window, horizon);
+            return;
+        }
         // 逐户生成。一户出一个同行团，团人数从户均人数涌现出来。
         //
         // 早高峰的主流是「住宅层到出口层」，晚高峰反过来。中午两向都有。
@@ -448,6 +452,37 @@ impl World {
                         self.emit_party(ent, level, size, t0, false, false, horizon, &mut rng);
                     }
                 }
+            }
+        }
+    }
+
+    /// 层间交通的生成器。医院、写字楼这类场景用它。
+    ///
+    /// 客流表里每一股给出起终点与占比。总的团数按全楼住户乘出行率估出，
+    /// 再按占比摊到各股上。所以 `units_per_floor` 在这个模式下读作「每层几个
+    /// 科室或病房」，`persons_per_unit` 读作「每间常驻几人」。
+    fn build_inter_floor(
+        &mut self,
+        rng: &mut crate::rng::Streams,
+        dep: f64,
+        window: f64,
+        horizon: f64,
+    ) {
+        let flows = self.cfg.traffic.flows.clone();
+        if flows.is_empty() {
+            return;
+        }
+        let total: f64 = flows.iter().map(|f| f.share.max(0.0)).sum();
+        if total <= 0.0 {
+            return;
+        }
+        let parties = (self.cfg.building.total_residents() as f64 * dep).round().max(1.0) as usize;
+        for f in &flows {
+            let n = ((parties as f64) * f.share.max(0.0) / total).round() as usize;
+            for _ in 0..n {
+                let t0 = self.shape_intensity(rng.f64(Stream::Arrival)) * window;
+                let size = self.cfg.building.persons_per_unit.round().clamp(1.0, 4.0) as usize;
+                self.emit_party(f.from, f.to, size, t0, false, false, horizon, rng);
             }
         }
     }

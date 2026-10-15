@@ -255,6 +255,11 @@ fn abandon_to_stairs(w: &mut World, pid: usize, metrics: &mut Metrics) {
     let to = w.pax[pid].to;
     let stairs = w.cfg.stairs.clone();
     let floors = (to - level).abs();
+    // 可行性上限：没人会爬二十层楼梯去上班。超过这个层数就不许弃梯，
+    // 他只能继续等，见 `Stairs::practical_floor_cap`
+    if stairs.practical_floor_cap > 0 && floors > stairs.practical_floor_cap {
+        return;
+    }
     let cost = if to < level {
         stairs.cost_down(floors)
     } else {
@@ -1481,6 +1486,9 @@ mod tests {
         ]);
         c.cars = vec![lo, hi];
         c.traffic.departure_ratio = 1.0;
+        // 这一条测的是分区服务本身，把弃梯的可行性上限关掉，
+        // 否则远程乘客中途走不了楼梯，会长久留在队列里
+        c.stairs.practical_floor_cap = 0;
         // 窗口之外的收尾留够时间，免得把「仿真截断」当成「没人接」
         c.sim.horizon_s = 7200.0;
         assert!(c.validate().is_ok(), "这份分区配置应当合法");
@@ -1818,6 +1826,80 @@ mod tests {
                 "腿序号不该越界：{} / {}",
                 p.hop_idx,
                 p.n_hops
+            );
+        }
+    }
+
+    /// 层间交通：每一位乘客的起终点都来自配置里的某一股。
+    #[test]
+    fn inter_floor_traffic_follows_the_configured_flows() {
+        use crate::config::{Flow, Pattern};
+        let mut c = Config::default();
+        c.building.top_level = 20;
+        c.building.units_per_floor = vec![4; 20];
+        c.cars = vec![CarSpec::default(); 2];
+        c.traffic.pattern = Pattern::InterFloor;
+        c.traffic.departure_ratio = 0.5;
+        c.traffic.flows = vec![Flow::new(3, 15, 0.6), Flow::new(15, 3, 0.4)];
+        assert!(c.validate().is_ok(), "{:?}", c.validate().errors().map(|i| i.code).collect::<Vec<_>>());
+
+        let w = World::new(c.clone());
+        assert!(w.pax.len() > 10, "层间客流应该造出人");
+        for p in &w.pax {
+            let (f, t) = (p.hops[0].from, p.hops[0].to);
+            assert!(
+                (f, t) == (3, 15) || (f, t) == (15, 3),
+                "起终点必须来自配置的那两股，实际 {f} 到 {t}"
+            );
+        }
+        // 反方向的那一股也要有人
+        let back = w.pax.iter().filter(|p| p.hops[0].from == 15).count();
+        assert!(back > 0, "反向那股也该有人在走");
+    }
+
+    /// 层间模式下没有客流表就要报错，免得跑出一个空场景。
+    #[test]
+    fn inter_floor_without_flows_is_rejected() {
+        use crate::config::Pattern;
+        let mut c = Config::default();
+        c.traffic.pattern = Pattern::InterFloor;
+        let v = c.validate();
+        assert!(v.errors().any(|i| i.code == "no_flows"));
+    }
+
+    /// 院楼预设能跑，而且客流确实发生在高层之间。
+    #[test]
+    fn hospital_preset_runs_between_upper_floors() {
+        let c = crate::config::preset("hospital").unwrap();
+        assert!(c.validate().is_ok(), "{:?}", c.validate().errors().map(|i| i.code).collect::<Vec<_>>());
+        let r = default_run(c);
+        assert!(r.metrics.pax_total > 50, "院楼该有几百段行程，实际 {}", r.metrics.pax_total);
+        // 每一段的起终点都不在主入口层，这正是层间交通的样子
+        for p in &r.world.pax {
+            assert!(p.hops[0].from >= 2, "院楼的客流不该从主入口层出发");
+            assert!(p.hops[0].to >= 2);
+        }
+    }
+
+    /// 弃梯受步层数上限约束：没人会爬二十层楼梯。
+    #[test]
+    fn abandonment_respects_the_walkable_floor_cap() {
+        let mut c = Config::default();
+        c.building.top_level = 22;
+        c.building.units_per_floor = vec![6; 22];
+        c.cars = vec![CarSpec::default()]; // 一台车伺候二十层，必然等很久
+        c.stairs.practical_floor_cap = 6;
+        c.stairs.abandon_after_s = 30.0;
+        c.traffic.departure_ratio = 1.0;
+        c.sim.horizon_s = 7200.0;
+        let r = default_run(c);
+        assert!(r.metrics.abandoned > 0, "这么挤的配置该有人弃梯");
+        for p in r.world.pax.iter().filter(|p| p.abandoned) {
+            let span = (p.hops[0].to - p.hops[0].from).abs();
+            assert!(
+                span <= 6,
+                "超过步层上限还弃梯了：{} 层跨度",
+                span
             );
         }
     }
