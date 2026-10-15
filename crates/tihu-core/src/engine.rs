@@ -468,7 +468,6 @@ impl World {
         horizon: f64,
         rng: &mut crate::rng::Streams,
     ) {
-        let overload = &self.cfg.overload;
         let stairs = &self.cfg.stairs;
         let dwell = rng.lognormal(self.cfg.traffic.return_dwell_s.max(1.0), 0.5).max(30.0);
         let patience = if stairs.enabled && stairs.abandon_after_s > 0.0 {
@@ -481,11 +480,8 @@ impl World {
             let jitter = if k == 0 { 0.0 } else { rng.range(Stream::Arrival, 0.0, 90.0) };
             let t_arrive = (t0 + jitter).min(horizon);
             let tol = rng.tolerance();
-            let weight = if is_child && k + 1 < size {
-                rng.gens_for_weight(overload.child_weight_kg, overload.weight_cv)
-            } else {
-                rng.gens_for_weight(overload.adult_weight_kg, overload.weight_cv)
-            };
+            // 带小孩的同行团，尾部那几位走小孩体重那一峰，保证相关性
+            let weight = rng.body_weight(&self.cfg.weight, is_child && k + 1 < size);
             let strategy = self.cfg.strategy.pick(rng.f64(Stream::Strategy));
             // 红线 4：低楼层有人走楼梯。这是出发前就定下的，与半路弃梯分开
             let est = estimate_wait(from, &self.cfg) + estimate_ride(from, &self.cfg);
