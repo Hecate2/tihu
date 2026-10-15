@@ -32,26 +32,46 @@ impl Default for MotionProfile {
     }
 }
 
+/// 常用速度档位，每一项是「额定速度，加速度，加加速度」。
+///
+/// 网页允许用户填任意小数速度，加减速度不好跟着瞎编，就取最接近的这一档。
+/// 出处与不确定度见 `docs/MODEL.md` 第 3.1 节。超过 3.0 之后手头没有更高速梯的
+/// 加减速度实测，一律按 3.0 那一档取，TODO(calibration)。
+pub const SPEED_TIERS: [(f32, f32, f32); 5] = [
+    (1.00, 0.50, 0.60),
+    (1.60, 0.65, 0.80),
+    (1.75, 0.80, 1.00),
+    (2.50, 1.00, 1.20),
+    (3.00, 1.00, 1.30),
+];
+
 impl MotionProfile {
+    /// 给一个额定速度配一套加减速度，取最接近的那个档位。
+    ///
+    /// 速度恰好落在档位上时就取那一档，所以 [`MotionProfile::preset`] 的结果
+    /// 与档位表逐位相同。
+    pub fn for_speed(v_max: f32) -> Self {
+        let t = SPEED_TIERS
+            .iter()
+            .min_by(|a, b| (a.0 - v_max).abs().total_cmp(&(b.0 - v_max).abs()))
+            .copied()
+            .unwrap_or(SPEED_TIERS[2]);
+        Self { v_max, a_acc: t.1, a_dec: t.1, j_acc: t.2, j_dec: t.2 }
+    }
+
     /// 住宅常见的速度档位预设。加速度与加加速度一律待标定。
     ///
     /// 表中的时间数字由 [`traverse_time`] 算出，可重跑 `cargo bench --bench kinematics` 复现。
     pub fn preset(name: &str) -> Option<Self> {
-        let p = match name {
-            "low_rise_1_0" => (1.00, 0.50, 0.60),
-            "std_1_6" => (1.60, 0.65, 0.80),
-            "std_1_75" => (1.75, 0.80, 1.00),
-            "high_2_5" => (2.50, 1.00, 1.20),
-            "high_3_0" => (3.00, 1.00, 1.30),
+        let v = match name {
+            "low_rise_1_0" => 1.00,
+            "std_1_6" => 1.60,
+            "std_1_75" => 1.75,
+            "high_2_5" => 2.50,
+            "high_3_0" => 3.00,
             _ => return None,
         };
-        Some(Self {
-            v_max: p.0,
-            a_acc: p.1,
-            a_dec: p.1,
-            j_acc: p.2,
-            j_dec: p.2,
-        })
+        Some(Self::for_speed(v))
     }
 
     /// 全部预设的名字，供网页下拉框与命令行共用。
