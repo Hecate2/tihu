@@ -460,6 +460,9 @@ mod tests {
     static EMPTY_Q: [u32; 0] = [];
 
     fn rv(at: f32, dir: Dir, mine: Vec<HallCall>, car_calls: Vec<i16>, load: usize) -> RunView<'static> {
+        // 把两个 Vec 泄漏成 'static 切片，测试专用
+        let mine: &'static [HallCall] = Box::leak(mine.into_boxed_slice());
+        let car_calls: &'static [i16] = Box::leak(car_calls.into_boxed_slice());
         RunView {
             now: 0.0,
             car: 0,

@@ -83,11 +83,6 @@ pub fn run<R: Router, A: Assigner, B: Boarding>(
     }
     if std::env::var("TIHU_ARR").is_ok() {
         eprintln!("[init] n_levels={} 首批排入={} 堆容量={}", w.n_levels, seq, heap.capacity());
-        for lvl in 0..w.n_levels {
-            let q = &w.queues[lvl];
-            eprintln!("  L{} 队列{} 首位到达={:?}", lvl, q.waiting.len(),
-                q.waiting.first().map(|&p| w.pax[p].t_arrive));
-        }
     }
     // 轿厢从大堂起步
     for id in 0..w.cars.len() {
@@ -98,28 +93,20 @@ pub fn run<R: Router, A: Assigner, B: Boarding>(
     let mut stalls: usize = 0;
     let mut stall_seconds = 0.0;
     let mut orphaned = 0usize;
-    let mut ghost_stops = 0usize;
+    let ghost_stops = 0usize;
     let mut full_bypasses = 0usize;
 
     // 事件数上限。事件驱动一旦排程出错就会零时刻死循环，这里是兜底
     let max_events = 20_000_000usize;
     let mut n_events = 0usize;
 
-    let mut max_time_seen = 0.0f64;
     while let Some(ev) = heap.pop() {
         if ev.at > horizon {
-            eprintln!("[loop] 因超出仿真窗口结束. 事件={} 最后时刻={:.1} horizon={:.1}",
-                n_events, max_time_seen, horizon);
             break;
         }
-        max_time_seen = ev.at;
         n_events += 1;
         if n_events > max_events {
-            eprintln!("[loop] 事件数超上限 {}，强制结束。最后时刻={:.1}", n_events, max_time_seen);
             break;
-        }
-        if std::env::var("TIHU_ARR").is_ok() && n_events % 10000 == 0 {
-            eprintln!("[loop] 事件={} t={:.1} 堆={}", n_events, ev.at, heap.len());
         }
         w.now = ev.at;
         match ev.kind {
@@ -147,10 +134,6 @@ pub fn run<R: Router, A: Assigner, B: Boarding>(
                         newly.push(pid);
                     }
                 }
-                if std::env::var("TIHU_ARR").is_ok() {
-                    eprintln!("[arr] t={:.1} qi={} 新到{} arrived={} 总{}",
-                        now, qi, newly.len(), w.queues[qi].arrived, w.queues[qi].waiting.len());
-                }
                 if newly.is_empty() {
                     // 这一层的人还没到。排下一次唤醒
                     let q = &w.queues[qi];
@@ -171,13 +154,9 @@ pub fn run<R: Router, A: Assigner, B: Boarding>(
 
                 // 派梯与唤醒。顺序要紧：先派梯把活挂到某台车上，再叫醒它
                 sync_assignments(&mut w);
-                if std::env::var("TIHU_STEP").map(|v| v=="1").unwrap_or(true) {
-                    dispatch_unowned(&mut w, assigner, &mut sv);
-                }
+                dispatch_unowned(&mut w, assigner, &mut sv);
                 sync_assignments(&mut w);
-                if std::env::var("TIHU_STEP").map(|v| v!="2").unwrap_or(true) {
-                    wake_idle_cars(&mut w, &mut heap, &mut seq);
-                }
+                wake_idle_cars(&mut w, &mut heap, &mut seq);
 
                 // 排下一次到达
                 let q = &w.queues[qi];
@@ -189,8 +168,7 @@ pub fn run<R: Router, A: Assigner, B: Boarding>(
             }
 
             Kind::CarStep(id) => {
-                let at = step_car(&mut w, id, router, assigner, boarding, &mut sv, &mut heap, &mut seq, &mut rng);
-                let _ = at;
+                step_car(&mut w, id, router, boarding, &mut sv, &mut heap, &mut seq, &mut rng);
             }
             Kind::StallTick(id) => {
                 // 超载僵局：问一次有没有人愿意退出
@@ -416,7 +394,7 @@ fn wake_idle_cars(
     let mut wake_list: Vec<CarId> = Vec::with_capacity(w.cars.len());
     for cid in 0..w.cars.len() {
         let c = &w.cars[cid];
-        if c.phase != CarPhase::Idle || c.woken {
+        if c.phase != CarPhase::Idle {
             continue;
         }
         let riders = !c.occupants.is_empty();
@@ -552,16 +530,14 @@ fn register_calls<A: Assigner>(
 }
 
 /// 推进一步轿厢状态机。
-/// 推进一步轿厢状态机。
 ///
 /// 结构上分成三段：先做只读决策，再按阶段执行，最后统一排下一次事件。
 /// 这样排期只有一处，漏排就立刻表现为「轿厢停住不动」，不会静默错乱。
 #[allow(clippy::too_many_arguments)]
-fn step_car<R: Router, A: Assigner, B: Boarding>(
+fn step_car<R: Router, B: Boarding>(
     w: &mut World,
     id: CarId,
     router: &mut R,
-    assigner: &A,
     boarding: &B,
     sv: &mut Scratch,
     heap: &mut std::collections::BinaryHeap<Ev>,
@@ -626,12 +602,6 @@ fn step_car<R: Router, A: Assigner, B: Boarding>(
         } else {
             router.next_leg(&rv)
         };
-        if std::env::var("TIHU_IDLE").is_ok() && phase == CarPhase::Idle {
-            eprintln!(
-                "[idle] t={:.1} 车{} here={} stop={} leg={:?} riders={} 名下={} 全楼有人等={}",
-                w.now, id, here, stop, leg, has_riders, rv.mine.len(), someone_still_waiting(w)
-            );
-        }
         (stop, leg)
     };
 
@@ -715,20 +685,6 @@ fn step_car<R: Router, A: Assigner, B: Boarding>(
     // 用 `>` 会漏排，轿厢就此停摆，车里的人永远出不去。
     // 排下一次。最小间隔 1 毫秒是防自触发的兜底：
     // 若某条路径把排期设成了当前时刻，不加这个下限就会同刻无限重排
-    if std::env::var("TIHU_ARR").is_ok() && w.now < 560.0 {
-        eprintln!(
-            "[sched] t={:.3} 车{} phase={:?} next_event={} at<=now? {}",
-            w.now, id, w.cars[id].phase, w.cars[id].next_event,
-            w.cars[id].next_event <= w.now
-        );
-    }
-    if std::env::var("TIHU_ARR").is_ok() && w.now > 700.0 && w.now < 760.0 {
-        eprintln!(
-            "[dec] t={:.2} 车{} phase={:?} here={} stop={} leg={:?} 名下{} 等待中={}",
-            w.now, id, phase, w.cars[id].level.round(), must_stop, next_leg,
-            w.cars[id].assigned.len(), someone_still_waiting(w)
-        );
-    }
     let at = w.cars[id].next_event;
     if at.is_finite() && at > w.now && w.cars[id].phase != CarPhase::Stalled {
         heap.push(Ev { at, seq: *seq, kind: Kind::CarStep(id) });
@@ -828,47 +784,12 @@ fn idle_leg<R: Router>(rv: &RunView<'_>, router: &R) -> Leg {
     }
 }
 
-/// Leg 里的目标层。
-fn leg_target(leg: Leg, fallback: f32) -> f64 {
-    match leg {
-        Leg::Up(t) | Leg::Down(t) => t as f64,
-        Leg::Park => fallback as f64,
-    }
-}
-
 /// `DefaultBoarding` 的概率公式。放在这里是因为随机性归内核，策略对象本身不掷骰子。
 fn default_accept_prob(s: &AdmitSample, tol: f64) -> f64 {
     if s.free_slots == 0 {
         return 0.0;
     }
     crate::config::Boarding::default().accept_prob(s.load_ratio, tol, s.waited_s)
-}
-
-/// 清掉这一层已经服务完的呼叫。
-///
-/// 判据是「还有没有人真的在等」。已经上梯的人不算，他们由 `boarded_car` 标记。
-fn clear_served_calls(w: &mut World, id: CarId, level: i16) {
-    let qi = w.qidx(level);
-    let n = w.queues[qi].arrived.min(w.queues[qi].waiting.len());
-    let still_waiting = w.queues[qi].waiting[..n]
-        .iter()
-        .any(|&p| w.pax[p].boarded_car.is_none() && w.pax[p].to != level);
-    if still_waiting {
-        return;
-    }
-    for dir in [Dir::Up, Dir::Down] {
-        let slot = Call::slot_index(level, dir, w.basement);
-        let call_id = w.calls.slots[slot];
-        let Some(cid) = call_id else { continue };
-        let owner = w.calls.get(cid).and_then(|c| c.owner);
-        if owner != Some(id) {
-            continue;
-        }
-        w.calls.clear_slot(level, dir);
-        if let Some(car) = w.cars.get_mut(id) {
-            car.assigned.retain(|&a| a != cid);
-        }
-    }
 }
 
 /// 一次僵持的结果。
@@ -914,7 +835,8 @@ fn stall_tick<A: Assigner>(
         }
     }
 
-    let mut orphaned = 0usize;
+    // TODO(metrics): calls_orphaned 尚未真正统计，等停靠语义重写后补
+    let orphaned = 0usize;
     if let Some((pos, pid)) = exited {
         w.cars[id].occupants.remove(pos);
         w.pax[pid].t_exit = w.now;
@@ -1188,14 +1110,6 @@ fn try_board_one<B: Boarding>(
         Dir::None => true,
         d => d == wants,
     };
-    if std::env::var("TIHU_BOARD").is_ok() {
-        eprintln!(
-            "[board] t={:.2} lv={} pid={} wants={:?} dir={:?} matching={} free={} load={}/{}",
-            now, lv, pid, wants, w.cars[id].dir, matching,
-            capacity_rated.saturating_sub(w.cars[id].occupants.len()),
-            w.cars[id].occupants.len(), capacity_rated
-        );
-    }
     if !matching {
         return false;
     }
