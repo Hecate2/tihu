@@ -42,10 +42,10 @@ pub struct Building {
 impl Default for Building {
     fn default() -> Self {
         Self {
-            // 顶层 19 号，18 个住宅层上面再加一个会住人的主入口层
-            top_level: 19,
+            // 18 层住宅，层号 1 到 18，主入口层就是 1 层，也住人
+            top_level: 18,
             floor_height: 3.0,
-            units_per_floor: vec![4u8; 19],
+            units_per_floor: vec![4u8; 18],
             persons_per_unit: 2.8,
             basement_levels: 0,
             floor_area_m2: None,
@@ -1080,18 +1080,14 @@ impl Config {
 
 /// 网页与命令行共用的预设。
 ///
-/// 层号 1 是主入口层，所以「18 层住宅」的 `top_level` 是 19。预设楼盘的一层
-/// 一律当作纯大堂，不摆住户，`ground_floor_residential` 显式置为 `false`。
-/// 这与 `Config::default()` 的「主入口层住人」不同，理由在 `docs/MODEL.md`
-/// 第 2 节：预设要对应一个能报出住宅层数的具体楼盘。
+/// 「N 层住宅」的 `top_level` 就是 N，层号 1 到 N，主入口层就是 1 层，也住人。
+/// 编号约定见 `docs/MODEL.md` 第 2 节。
 pub fn preset(name: &str) -> Option<Config> {
     let mut c = Config::default();
-    let set = |c: &mut Config, residential: i16, units: u8, cars: usize| {
-        c.building.top_level = residential + 1;
-        let mut v = vec![units; (residential + 1) as usize];
-        v[0] = 0; // 预设的一层是纯大堂，不住人
-        c.building.units_per_floor = v;
-        c.building.ground_floor_residential = false;
+    let set = |c: &mut Config, levels: i16, units: u8, cars: usize| {
+        c.building.top_level = levels;
+        c.building.units_per_floor = vec![units; levels as usize];
+        c.building.ground_floor_residential = true;
         c.cars = vec![CarSpec::default(); cars];
     };
     match name {
@@ -1113,7 +1109,7 @@ pub fn preset(name: &str) -> Option<Config> {
             c.traffic.reverse_ratio = 0.5;
         }
         "hospital" => {
-            // 一栋二十四层的院楼。层号 1 是主入口，2 到 25 是各科室与病区
+            // 一栋二十四层的院楼。层号 1 到 24，1 层是主入口层
             set(&mut c, 24, 4, 3);
             c.building.persons_per_unit = 3.0;
             c.traffic.pattern = Pattern::InterFloor;
@@ -1343,11 +1339,12 @@ mod tests {
     #[test]
     fn expected_trips_scales_with_population() {
         let c = preset("std_tall").unwrap();
-        // 层号 1 是主入口层，不住人。住宅层是 2 到 34，每层 round(6 × 2.8) = 17 人
-        assert_eq!(c.building.residents_at(1), 0, "主入口层不住人");
+        // 层号 1 到 33 都住人，每层 round(6 × 2.8) = 17 人。主入口层的人在
+        // 出门时抬脚就到，不产生行程，所以要扣掉。
+        assert_eq!(c.building.residents_at(1), 17, "主入口层住人，也是住宅层");
         assert_eq!(c.building.residents_at(2), 17);
         assert_eq!(c.building.total_residents(), 33 * 17);
-        assert_eq!(c.expected_trips(), (33.0 * 17.0 * 0.66) as usize);
+        assert_eq!(c.expected_trips(), (32.0 * 17.0 * 0.66) as usize);
     }
 
     /// 配置往返 JSON 必须一模一样。网页传的就是这份 JSON，

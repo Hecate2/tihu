@@ -156,10 +156,12 @@ impl SimReport {
         let m: &Metrics = &run.metrics;
         let b = &run.cfg().building;
         let basement = b.basement_levels.max(0);
+        // 层号 0 不存在，逐层明细里也不许出现这一格
         let floors = m
             .by_floor
             .iter()
             .enumerate()
+            .filter(|(i, _)| *i != basement as usize)
             .map(|(i, f)| {
                 let level = i as i16 - basement;
                 FloorRow {
@@ -504,10 +506,11 @@ mod tests {
         let r = report_json(&cfg, "down_peak_sweep");
         let v: serde_json::Value = serde_json::from_str(&r).unwrap();
         let floors = v["sim"]["floors"].as_array().unwrap();
-        assert_eq!(floors.len(), c.building.n_levels(), "逐层明细的条数要等于楼层格位数");
+        assert_eq!(floors.len(), c.building.n_levels() - 1, "层号 0 不存在，明细要比格位数少一格");
+        assert!(floors.iter().all(|f| f["level"] != 0), "层号 0 不该出现在明细里");
         assert_eq!(floors[0]["level"], -2);
         assert_eq!(floors[0]["label"], "B2");
-        assert_eq!(floors[3]["label"], "1F", "第 1 层是主入口层，前面正好是 B2、B1");
+        assert_eq!(floors[2]["label"], "1F", "第 1 层是主入口层，前面正好是 B2、B1");
     }
 
     /// 全部预设都要能跑，一个都不许 panic。
