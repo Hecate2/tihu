@@ -75,7 +75,9 @@ legend { color: var(--ink-dim); font-size: 12px; padding: 0; }
   margin-bottom: 8px;
 }
 .row label { font-size: 13px; color: var(--ink); }
-.row .hint { display: block; font-size: 11px; color: var(--ink-dim); }
+/* 提示独立成行、字小一档。不限定在 .row 里，因为开关那一行用的是 .check，
+   早期只写 .row .hint，开关后面的提示就沿用了正文的字号与颜色，看着像句尾多话。 */
+.hint { display: block; font-size: 11px; color: var(--ink-dim); }
 input[type="number"], select {
   width: 100%;
   background: var(--panel-2);
