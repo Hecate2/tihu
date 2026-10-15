@@ -12,7 +12,7 @@
 use crate::builtin::{DefaultBoarding, DownPeakSweep};
 use crate::config::{CallSurface, Config, Strategy};
 use crate::engine::{Call, CarPhase, Scratch, World};
-use crate::metrics::{FloorStats, Metrics};
+use crate::metrics::Metrics;
 use crate::motion::{decel_distance, state_at, time_at_distance, Dir};
 use crate::policy::{AdmitSample, Assigner, Boarding, CarId, HallCall, Leg, Router, SystemView, Verdict};
 use crate::rng::{Stream, Streams};
@@ -33,11 +33,14 @@ impl Run {
     }
 }
 
-/// 事件。堆里只放这三类。
+/// 事件。堆里只放这四类。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Kind {
     CarStep(CarId),
-    Arrival(u16),
+    /// 某位乘客走到电梯厅了
+    Arrive(usize),
+    /// 某位乘客等得不耐烦，改走楼梯
+    Abandon(usize),
     StallTick(CarId),
 }
 
@@ -78,15 +81,22 @@ pub fn run<R: Router, A: Assigner, B: Boarding>(
 
     let horizon = w.cfg.sim.horizon_s;
     let mut heap: std::collections::BinaryHeap<Ev> =
-        std::collections::BinaryHeap::with_capacity(w.cars.len() + w.n_levels + 8);
+        std::collections::BinaryHeap::with_capacity(w.cars.len() + w.pax.len() + 8);
     let mut seq: u64 = 0;
+    let mut metrics = Metrics::with_floors(w.n_levels);
 
-    // 首批到达事件。每层排最早到的那一个，往后由 Arrival 分支自己续排。
-    for lvl in 0..w.n_levels {
-        let q = &w.queues[lvl];
-        if q.arrived < q.waiting.len() {
-            let first = q.waiting[q.arrived];
-            heap.push(Ev { at: w.pax[first].t_arrive, seq, kind: Kind::Arrival(lvl as u16) });
+    // 每位乘客的第一条腿排一次进场事件。两条腿的乘客，第二条腿的进场事件
+    // 在他到站时按「出梯时刻加停留时长」再排，所以条件性需求不用提前知道
+    for pid in 0..w.pax.len() {
+        if w.pax[pid].used_stairs || w.pax[pid].t_exit > 0.0 {
+            continue;
+        }
+        heap.push(Ev { at: w.pax[pid].t_arrive, seq, kind: Kind::Arrive(pid) });
+        seq += 1;
+        // 等得不耐烦的兜底：到点还没上车就改走楼梯
+        let patience = w.pax[pid].patience_s;
+        if patience.is_finite() && patience > 0.0 {
+            heap.push(Ev { at: w.pax[pid].t_arrive + patience, seq, kind: Kind::Abandon(pid) });
             seq += 1;
         }
     }
@@ -112,49 +122,36 @@ pub fn run<R: Router, A: Assigner, B: Boarding>(
         }
         w.now = ev.at;
         match ev.kind {
-            Kind::Arrival(lvl) => {
-                // 到达事件只负责「把这一层已经到点的人放进电梯厅」。
-                // 判据是到达时刻是否已过，与队列游标无关。
-                let now = w.now;
-                let qi = lvl as usize;
-                if qi >= w.queues.len() {
-                    continue;
-                }
-                let mut newly: Vec<usize> = Vec::with_capacity(8);
-                {
-                    let q = &w.queues[qi];
-                    let n = q.arrived.min(q.waiting.len());
-                    for k in n..q.waiting.len() {
-                        let pid = q.waiting[k];
-                        if w.pax[pid].t_arrive > now {
-                            break;
-                        }
-                        newly.push(pid);
-                    }
-                }
-                if newly.is_empty() {
-                    continue;
-                }
-                w.queues[qi].arrived += newly.len();
-                for &pid in &newly {
-                    w.pax[pid].called = true;
-                }
-
-                let level = lvl as i16 - w.basement;
-                register_calls(&mut w, level, &newly);
-                assign_unowned(&mut w, assigner, &mut sv, &mut heap, &mut seq);
-
-                // 排下一次到达
-                let q = &w.queues[qi];
-                if q.arrived < q.waiting.len() {
-                    let next = q.waiting[q.arrived];
-                    heap.push(Ev { at: w.pax[next].t_arrive, seq, kind: Kind::Arrival(lvl) });
+            Kind::Arrive(pid) => {
+                // 这位乘客走到电梯厅了。登记外呼，然后派梯
+                if w.pax[pid].t_arrive > w.now + 1e-9 {
+                    // 事件排在更早的时刻，重新排一次
+                    let at = w.pax[pid].t_arrive;
+                    heap.push(Ev { at, seq, kind: Kind::Arrive(pid) });
                     seq += 1;
+                    continue;
                 }
+                if !w.pax[pid].waiting() {
+                    continue;
+                }
+                let level = w.pax[pid].from;
+                if level < -w.basement || level > w.top {
+                    continue;
+                }
+                let qi = w.qidx(level);
+                w.hall[qi].push(pid);
+                register_calls(&mut w, level, &[pid]);
+                assign_unowned(&mut w, assigner, &mut sv, &mut heap, &mut seq);
+            }
+
+            Kind::Abandon(pid) => {
+                abandon_to_stairs(&mut w, pid, &mut metrics);
             }
 
             Kind::CarStep(id) => {
-                step_car(&mut w, id, router, boarding, &mut sv, &mut heap, &mut seq, &mut rng);
+                step_car(
+                    &mut w, id, router, boarding, &mut sv, &mut heap, &mut seq, &mut rng, &mut metrics,
+                );
                 after_event(&mut w, assigner, &mut sv, &mut heap, &mut seq);
             }
 
@@ -172,7 +169,7 @@ pub fn run<R: Router, A: Assigner, B: Boarding>(
         }
     }
 
-    let metrics = collect(&w, stalls, stall_seconds);
+    let metrics = collect(&w, stalls, stall_seconds, metrics);
     Run { world: w, metrics }
 }
 
@@ -218,11 +215,9 @@ fn waiting_for(w: &World, level: i16, dir: Dir) -> bool {
     if level < -w.basement || level > w.top {
         return false;
     }
-    let qi = w.qidx(level);
-    let n = w.queues[qi].arrived.min(w.queues[qi].waiting.len());
-    w.queues[qi].waiting[..n].iter().any(|&p| {
+    w.hall[w.qidx(level)].iter().any(|&p| {
         let pax = &w.pax[p];
-        if pax.t_exit > 0.0 || pax.used_stairs || pax.boarded_car.is_some() {
+        if !pax.waiting() {
             return false;
         }
         match dir {
@@ -232,6 +227,53 @@ fn waiting_for(w: &World, level: i16, dir: Dir) -> bool {
         }
     })
 }
+
+/// 这位乘客此刻是不是还在 `level` 层的电梯厅里等。
+fn in_hall(w: &World, pid: usize, level: i16) -> bool {
+    if level < -w.basement || level > w.top {
+        return false;
+    }
+    w.hall[w.qidx(level)].contains(&pid)
+}
+
+/// 等得不耐烦，改走楼梯。这一位乘客从电梯厅里退场，计入另一类统计。
+fn abandon_to_stairs(w: &mut World, pid: usize, metrics: &mut Metrics) {
+    if !w.pax[pid].waiting() {
+        return;
+    }
+    let level = w.pax[pid].from;
+    let to = w.pax[pid].to;
+    let stairs = w.cfg.stairs.clone();
+    let floors = (to - level).abs();
+    let cost = if to < level {
+        stairs.cost_down(floors)
+    } else {
+        stairs.cost_up(floors)
+    };
+    let t_arrive = w.pax[pid].t_arrive;
+    let waited = (w.now - t_arrive).max(0.0);
+    let qi = w.qidx(level);
+    if in_hall(w, pid, level) {
+        w.hall[qi].retain(|&p| p != pid);
+    }
+    // 弃梯的人确实等过，这段时间要算进等待分布，否则报告里的等待会被
+    // 系统性低估：等最久的那批人正好是弃梯走掉的那批
+    metrics.wait.add(waited);
+    let fs = &mut metrics.by_floor[qi];
+    fs.count += 1;
+    fs.wait_sum += waited;
+    fs.wait_max = fs.wait_max.max(waited);
+    fs.wait_samples.add(waited);
+    let pax = &mut w.pax[pid];
+    pax.abandoned = true;
+    pax.t_board = t_arrive;
+    pax.t_exit = w.now + cost;
+    pax.hops_done += 1;
+    pax.final_exit = pax.t_exit;
+    metrics.abandoned += 1;
+    metrics.by_floor[qi].stair_users += 1;
+}
+
 
 /// 按每条外呼的 owner 重建各轿厢的待办列表。
 fn sync_assignments(w: &mut World) {
@@ -453,6 +495,7 @@ fn step_car<R: Router, B: Boarding>(
     heap: &mut std::collections::BinaryHeap<Ev>,
     seq: &mut u64,
     rng: &mut Streams,
+    metrics: &mut Metrics,
 ) {
     let mut guard = 0;
     loop {
@@ -466,7 +509,7 @@ fn step_car<R: Router, B: Boarding>(
                 let here = w.cars[id].level.round() as i16;
                 // 有人要在这层下，先开门
                 if riders_alight_here(w, id, here) {
-                    begin_stop(w, id, boarding, rng, heap, seq);
+                    begin_stop(w, id, boarding, rng, heap, seq, metrics);
                     break;
                 }
                 // 这层名下有活、车里还有位子、并且真的有人在等，才开门。
@@ -476,7 +519,7 @@ fn step_car<R: Router, B: Boarding>(
                 let has_free = w.cars[id].occupants.len() < w.cfg.cars[id].capacity_rated;
                 let someone = waiting_for(w, here, Dir::Up) || waiting_for(w, here, Dir::Down);
                 if owns_call_at(w, id, here) && has_free && someone {
-                    begin_stop(w, id, boarding, rng, heap, seq);
+                    begin_stop(w, id, boarding, rng, heap, seq, metrics);
                     break;
                 }
                 match choose_leg(w, id, router, sv) {
@@ -498,7 +541,7 @@ fn step_car<R: Router, B: Boarding>(
             CarPhase::Moving => {
                 let here = w.cars[id].level.round() as i16;
                 if needs_stop(w, id, here) {
-                    begin_stop(w, id, boarding, rng, heap, seq);
+                    begin_stop(w, id, boarding, rng, heap, seq, metrics);
                     break;
                 }
                 if here == w.cars[id].leg_target {
@@ -701,11 +744,12 @@ fn begin_stop<B: Boarding>(
     rng: &mut Streams,
     heap: &mut std::collections::BinaryHeap<Ev>,
     seq: &mut u64,
+    metrics: &mut Metrics,
 ) {
     let lv = w.cars[id].level.round() as i16;
     w.cars[id].stop_started = w.now;
     w.cars[id].phase = CarPhase::Boarding;
-    board_and_alight(w, id, boarding, rng);
+    board_and_alight(w, id, boarding, rng, heap, seq, metrics);
 
     // 这一层的按键灯灭掉。
     //
@@ -794,17 +838,26 @@ fn board_dir_at(w: &World, id: CarId, here: i16) -> Dir {
     opposite.unwrap_or(d)
 }
 
-/// 先下后上。
-fn board_and_alight<B: Boarding>(w: &mut World, id: CarId, boarding: &B, rng: &mut Streams) {
+/// 先下后上。下车的乘客如果还有下一条腿，在这里推进到下一腿。
+#[allow(clippy::too_many_arguments)]
+fn board_and_alight<B: Boarding>(
+    w: &mut World,
+    id: CarId,
+    boarding: &B,
+    rng: &mut Streams,
+    heap: &mut std::collections::BinaryHeap<Ev>,
+    seq: &mut u64,
+    metrics: &mut Metrics,
+) {
     let lv = w.cars[id].level.round() as i16;
     let now = w.now;
 
     // 先下
     let mut alighted = 0usize;
+    let mut exited: Vec<usize> = Vec::with_capacity(16);
     w.cars[id].occupants.retain(|&p| {
         if w.pax[p].to == lv {
-            w.pax[p].t_exit = now;
-            w.pax[p].boarded_car = None;
+            exited.push(p);
             alighted += 1;
             false
         } else {
@@ -814,19 +867,64 @@ fn board_and_alight<B: Boarding>(w: &mut World, id: CarId, boarding: &B, rng: &m
     w.cars[id].last_alighted = alighted;
     w.cars[id].load_kg = w.cars[id].occupants.iter().map(|&p| w.pax[p].weight).sum();
 
+    // 记一条腿的指标。一条腿一算，所以带返程的乘客两条腿各算一次
+    for &pid in &exited {
+        let from = w.pax[pid].from;
+        let pax = &mut w.pax[pid];
+        pax.t_exit = now;
+        pax.boarded_car = None;
+        pax.hops_done += 1;
+        let (wait, ride, d2d) = (pax.wait(), pax.ride(), pax.door_to_door());
+        let lv_idx = (from + w.basement).clamp(0, w.n_levels as i16 - 1) as usize;
+        metrics.wait.add(wait);
+        metrics.ride.add(ride);
+        metrics.door_to_door.add(d2d);
+        let fs = &mut metrics.by_floor[lv_idx];
+        fs.count += 1;
+        fs.wait_sum += wait;
+        fs.wait_max = fs.wait_max.max(wait);
+        fs.wait_samples.add(wait);
+        fs.bypass_total += pax.bypass_count;
+        if pax.bypass_count > 0 {
+            fs.bypassed += 1;
+        }
+        fs.declined += pax.declined_count;
+        fs.no_space += pax.no_space_count;
+    }
+
+    // 还有下一条腿的人，过一阵子从这一层出发回去。这就是条件性需求
+    for &pid in &exited {
+        let idx = w.pax[pid].hop_idx;
+        let n = w.pax[pid].n_hops;
+        if (idx as usize) + 1 < n as usize {
+            let next = w.pax[pid].hops[idx as usize + 1];
+            let at = now + w.pax[pid].dwell_s;
+            w.pax[pid].hop_idx += 1;
+            w.pax[pid].from = next.from;
+            w.pax[pid].to = next.to;
+            w.pax[pid].t_arrive = at;
+            w.pax[pid].t_board = 0.0;
+            w.pax[pid].t_exit = 0.0;
+            w.pax[pid].bypass_count = 0;
+            w.pax[pid].declined_count = 0;
+            w.pax[pid].no_space_count = 0;
+            heap.push(Ev { at, seq: *seq, kind: Kind::Arrive(pid) });
+            *seq += 1;
+        } else {
+            w.pax[pid].final_exit = now;
+        }
+    }
+
     // 再上人。反复扫整段队列，直到一整轮没人能上为止。
     // 队首那位挤不上时，后面的人仍有机会上车，这是真实电梯的样子
-    let qi = w.qidx(lv);
     let want = board_dir_at(w, id, lv);
     let mut boarded = 0usize;
     let mut newly_boarded: Vec<usize> = Vec::with_capacity(16);
     loop {
         let mut progress = false;
-        let n = w.queues[qi].arrived.min(w.queues[qi].waiting.len());
-        for idx in 0..n {
-            let pid = w.queues[qi].waiting[idx];
-            // 已经上梯的、已经到过目的地的、以及走楼梯的，都不再参与上客
-            if w.pax[pid].boarded_car.is_some() || w.pax[pid].t_exit > 0.0 || w.pax[pid].used_stairs {
+        let snapshot: Vec<usize> = w.hall[w.qidx(lv)].clone();
+        for pid in snapshot {
+            if !w.pax[pid].waiting() {
                 continue;
             }
             if try_board_one(w, id, lv, pid, want, boarding, now, rng) {
@@ -841,13 +939,16 @@ fn board_and_alight<B: Boarding>(w: &mut World, id: CarId, boarding: &B, rng: &m
     }
     w.cars[id].last_boarded = boarded;
 
+    // 上梯的人离开电梯厅
+    if !newly_boarded.is_empty() {
+        let idx = w.qidx(lv);
+        w.hall[idx].retain(|p| !newly_boarded.contains(p));
+    }
+
     // 未满载就走，而层上还有人等，记一次不全载发车
     let rated = w.cfg.cars[id].capacity_rated;
     if boarded > 0 && w.cars[id].occupants.len() < rated && waiting_for(w, lv, want) {
         w.cars[id].partial_departures += 1;
-    }
-    for pid in newly_boarded {
-        w.pax[pid].called = true;
     }
 }
 
@@ -1014,20 +1115,19 @@ fn stall_tick(
 }
 
 /// 汇总指标。
-fn collect(w: &World, stalls: usize, stall_seconds: f64) -> Metrics {
-    let mut m = Metrics::default();
-
+///
+/// 时间类指标在乘客每次到站时就逐腿累加完了，这里只把配置、计数与均值补齐。
+fn collect(w: &World, stalls: usize, stall_seconds: f64, mut m: Metrics) -> Metrics {
+    m.pax_total = w.pax.len();
     for p in &w.pax {
-        if p.used_stairs {
+        if p.hops_done == 0 {
+            continue;
+        }
+        if p.used_stairs || p.abandoned {
             m.stair_users += 1;
             continue;
         }
-        if p.t_exit <= 0.0 {
-            continue;
-        }
-        m.wait.add(p.wait());
-        m.ride.add(p.ride());
-        m.door_to_door.add(p.door_to_door());
+        m.pax_served += 1;
         if p.bypass_count > 0 {
             m.pax_with_bypass += 1;
         }
@@ -1038,8 +1138,6 @@ fn collect(w: &World, stalls: usize, stall_seconds: f64) -> Metrics {
             m.pax_after_stall += 1;
         }
     }
-    m.pax_total = w.pax.len();
-    m.pax_served = m.door_to_door.count;
     if m.pax_served > 0 {
         m.pax_any_bypass = m.pax_with_bypass as f64 / m.pax_served as f64;
         m.pax_bypass3_frac = m.pax_bypass3 as f64 / m.pax_served as f64;
@@ -1047,38 +1145,11 @@ fn collect(w: &World, stalls: usize, stall_seconds: f64) -> Metrics {
     if !w.pax.is_empty() {
         m.stair_share = m.stair_users as f64 / w.pax.len() as f64;
     }
-
-    // 楼层视角，下标 = 层号 + 地下层数
-    let mut fs: Vec<FloorStats> = vec![FloorStats::default(); w.n_levels];
-    for p in &w.pax {
-        if p.t_exit <= 0.0 {
-            continue;
-        }
-        if p.from < -w.basement || p.from > w.top {
-            continue;
-        }
-        let s = &mut fs[(p.from + w.basement) as usize];
-        if p.used_stairs {
-            s.stair_users += 1;
-            continue;
-        }
-        s.count += 1;
-        s.wait_sum += p.wait();
-        s.wait_max = s.wait_max.max(p.wait());
-        s.wait_samples.add(p.wait());
-        s.bypass_total += p.bypass_count;
-        if p.bypass_count > 0 {
-            s.bypassed += 1;
-        }
-        s.declined += p.declined_count;
-        s.no_space += p.no_space_count;
-    }
-    for s in fs.iter_mut() {
+    for s in m.by_floor.iter_mut() {
         if s.count > 0 {
             s.wait_mean = s.wait_sum / s.count as f64;
         }
     }
-    m.by_floor = fs;
 
     // 系统视角
     m.stalls = stalls;
@@ -1359,5 +1430,104 @@ mod tests {
         let w = World::new(c);
         assert_eq!(w.cars[0].level, 3.0);
         assert_eq!(w.cars[1].level, 6.0);
+    }
+
+    /// 晚高峰：主流是从主入口层上楼回家。重写前这一股客流根本不生成。
+    #[test]
+    fn evening_peak_starts_from_the_lobby() {
+        let mut c = Config::default();
+        c.building.floors = 18;
+        c.building.units_per_floor = vec![6; 18];
+        c.traffic.pattern = crate::config::Pattern::EveningUp;
+        let w = World::new(c);
+        let from_lobby = w.pax.iter().filter(|p| p.hops[0].from == crate::config::LOBBY).count();
+        assert!(
+            from_lobby * 2 > w.pax.len(),
+            "晚高峰应当以主入口层出发为主，实际 {} / {}",
+            from_lobby,
+            w.pax.len()
+        );
+        assert!(
+            w.pax.iter().any(|p| p.hops[0].from > crate::config::LOBBY),
+            "晚高峰也该有一小撮人下楼"
+        );
+    }
+
+    /// 有地下层时，会有乘客从地下进楼，也会有人下到地下。
+    /// 车库客流是低概率的，单次抽取可能抽不到，扫多个种子看有没有出现
+    #[test]
+    fn basement_passengers_go_both_ways() {
+        let mut found_down = false;
+        let mut found_up = false;
+        for seed in 0..30 {
+            let mut c = Config::default();
+            c.building.floors = 12;
+            c.building.units_per_floor = vec![6; 12];
+            c.building.basement_levels = 2;
+            c.cars = vec![CarSpec::default()];
+            c.traffic.pattern = crate::config::Pattern::NoonMixed;
+            c.traffic.departure_ratio = 1.0;
+            c.sim.seed = seed;
+            let w = World::new(c);
+            found_down |= w.pax.iter().any(|p| p.hops[0].to < 0);
+            found_up |= w.pax.iter().any(|p| p.hops[0].from < 0);
+        }
+        assert!(found_down, "三十个种子里该有人从楼上下去车库");
+        assert!(found_up, "三十个种子里该有人从车库上楼");
+    }
+
+    /// 条件性需求：到站之后停一阵再回来，会形成第二条行程腿。
+    #[test]
+    fn return_trips_are_conditional_on_arrival() {
+        let mut c = small();
+        c.traffic.return_ratio = 1.0;
+        c.traffic.return_dwell_s = 600.0;
+        c.traffic.departure_ratio = 1.0;
+        let w = World::new(c.clone());
+        let two_legged = w.pax.iter().filter(|p| p.n_hops == 2).count();
+        assert!(two_legged > 0, "全都要返程时应当出现两条腿的乘客");
+        assert!(
+            w.pax.iter().filter(|p| p.n_hops == 2).all(|p| p.hops[1].from == p.hops[0].to),
+            "第二条腿要从第一条腿的终点出发"
+        );
+        // 跑起来之后，返程的人真的会在目的层重新出现
+        let r = default_run(c);
+        assert!(
+            r.world.pax.iter().any(|p| p.hop_idx >= 1),
+            "该有人走完第一条腿后推进到第二条腿"
+        );
+    }
+
+    /// 等得不耐烦会改走楼梯，且单独计量，不混进出发前就走楼梯的那一类。
+    #[test]
+    fn impatient_passengers_abandon_to_stairs() {
+        let mut c = Config::default();
+        c.building.floors = 33;
+        c.building.units_per_floor = vec![8; 33];
+        c.cars = vec![CarSpec::default()]; // 一台车伺候六百多人，必然等很久
+        c.stairs.abandon_after_s = 60.0;
+        c.traffic.departure_ratio = 1.0;
+        c.sim.horizon_s = 7200.0;
+        let r = default_run(c);
+        assert!(r.metrics.abandoned > 0, "这种配置下应当有人等不下去改走楼梯");
+        let walkers = r.world.pax.iter().filter(|p| p.abandoned).count();
+        assert_eq!(walkers, r.metrics.abandoned);
+        assert!(
+            r.world.pax.iter().filter(|p| p.abandoned).all(|p| !p.used_stairs),
+            "出发前就走楼梯的人不该同时被记成弃梯"
+        );
+    }
+
+    /// 关掉弃梯开关之后没人再中途弃梯。
+    #[test]
+    fn disabling_abandon_keeps_everyone_waiting() {
+        let mut c = Config::default();
+        c.building.floors = 20;
+        c.building.units_per_floor = vec![8; 20];
+        c.cars = vec![CarSpec::default()];
+        c.stairs.abandon_after_s = 0.0;
+        c.traffic.departure_ratio = 1.0;
+        let r = default_run(c);
+        assert_eq!(r.metrics.abandoned, 0, "关掉之后不该有人弃梯");
     }
 }

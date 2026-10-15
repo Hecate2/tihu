@@ -166,11 +166,13 @@ pub enum Stream {
     Demand = 7,
     /// 超载僵持时谁愿意退出
     Stall = 8,
+    /// 每位乘客愿意等多久才改走楼梯
+    Patience = 9,
 }
 
 impl Stream {
     /// 全部流，用于自检。
-    pub const ALL: [Stream; 9] = [
+    pub const ALL: [Stream; 10] = [
         Stream::Arrival,
         Stream::Destination,
         Stream::Tolerance,
@@ -180,6 +182,7 @@ impl Stream {
         Stream::Timing,
         Stream::Demand,
         Stream::Stall,
+        Stream::Patience,
     ];
 }
 
@@ -249,6 +252,12 @@ impl Streams {
     #[inline]
     pub fn tolerance(&mut self) -> f64 {
         self.gens[Self::idx(Stream::Tolerance)].beta(2.0, 2.0)
+    }
+
+    /// 抽一个对数正态分布的时长。
+    #[inline]
+    pub fn lognormal(&mut self, median: f64, cv: f64) -> f64 {
+        self.gens[Self::idx(Stream::Patience)].lognormal(median, cv)
     }
 }
 

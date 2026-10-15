@@ -204,10 +204,12 @@ pub struct Metrics {
     pub pax_bypass3_frac: f64,
     /// 走楼梯的人数占比
     pub stair_share: f64,
-    /// 因超载僵局被赶出轿厢的人数
+    /// 因为超载僵局被赶出轿厢的人数
     pub pax_after_stall: usize,
     /// 走楼梯的人数
     pub stair_users: usize,
+    /// 等得不耐烦中途改走楼梯的人数
+    pub abandoned: usize,
 
     /// 轿厢数
     pub n_cars: usize,
@@ -237,6 +239,11 @@ pub struct Metrics {
 }
 
 impl Metrics {
+    /// 造一份指标累加器，逐层统计先按楼层数铺好，运行期直接按下标累加。
+    pub fn with_floors(n_levels: usize) -> Self {
+        Self { by_floor: vec![FloorStats::default(); n_levels], ..Self::default() }
+    }
+
     /// 五分钟输送人数，用于对照运力够不够。
     pub fn throughput_5min(&self, horizon_s: f64) -> f64 {
         if horizon_s <= 0.0 {

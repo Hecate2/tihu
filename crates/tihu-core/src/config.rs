@@ -247,6 +247,11 @@ pub struct Traffic {
     pub party_window_s: f64,
     /// 同行团里小孩的人数分布参数。带小孩的团才有
     pub child_party_ratio: f32,
+    /// 出门的人里有多大比例会在目的地待一阵再回来。
+    /// 大于 0 就会生成第二条行程腿，也就是条件性需求
+    pub return_ratio: f32,
+    /// 返程前在目的地停留多久的中位数，秒
+    pub return_dwell_s: f64,
 }
 
 impl Default for Traffic {
@@ -260,6 +265,8 @@ impl Default for Traffic {
             peak_beta: 2.5,
             party_window_s: 20.0,
             child_party_ratio: 0.35, // TODO(calibration) 早高峰要送小孩上学
+            return_ratio: 0.05,      // TODO(calibration) 折返拿东西、接送
+            return_dwell_s: 900.0,   // TODO(calibration)
         }
     }
 }
@@ -382,6 +389,10 @@ pub struct Stairs {
     /// 这一条不是概率参数，是可行性约束。十八层的楼里没有人会走十八层楼梯
     /// 去上班，哪怕电梯慢到离谱。物业也不让这么干。
     pub practical_floor_cap: i16,
+    /// 等多久之后会改走楼梯的中位数，秒。0 或关闭时不再有人中途弃梯
+    pub abandon_after_s: f64,
+    /// 耐心阈值的变异系数。越大越参差
+    pub abandon_cv: f64,
 }
 
 impl Default for Stairs {
@@ -393,9 +404,11 @@ impl Default for Stairs {
             fixed_s: 5.0,           // TODO(calibration)
             tau_s: 45.0,            // TODO(calibration)
             up_effort_mult: 3.0,    // TODO(calibration)
-            base_willingness: 0.31, // TODO(calibration)
+            base_willingness: 0.24, // TODO(calibration)
             decay_per_floor: 0.055, // TODO(calibration) 每层的相对衰减
             practical_floor_cap: 6,    // TODO(calibration) 六层以上基本没人走
+            abandon_after_s: 1200.0,   // TODO(calibration) 二十分钟等不到人就会走
+            abandon_cv: 0.45,          // TODO(calibration)
         }
     }
 }
