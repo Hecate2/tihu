@@ -1,2 +1,5 @@
 /target
 .workbuddy
+# 构建产物。wasm 由 make wasm 生成，dist 由 make web 与 make single 生成
+/dist
+/web/tihu.wasm
