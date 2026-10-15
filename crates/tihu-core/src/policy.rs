@@ -21,6 +21,8 @@ pub struct CarBrief {
     pub dir: Dir,
     /// 轿厢里的乘客数
     pub load: usize,
+    /// 当前载重，公斤。比人数更能说明白「还能不能再上人」
+    pub load_kg: f32,
     /// 额定人数
     pub capacity: usize,
     /// 名下还没服务完的外呼数
