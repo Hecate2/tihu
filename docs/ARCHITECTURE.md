@@ -377,4 +377,6 @@ CSV 一行一个组合，列包括全部输入参数加全部输出指标，可�
 | 代码怎么分层 | 本文件 |
 | 怎么写一个调度算法 | `docs/DISPATCH_API.md` |
 | 有多快 | `docs/PERFORMANCE.md` |
+| 能不能上 GPU | `docs/GPU.md` |
+| 能不能训强化学习 | `docs/RL.md` |
 | 下一步做什么 | `docs/PLAN.md` |

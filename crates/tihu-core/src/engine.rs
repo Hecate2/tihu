@@ -596,6 +596,7 @@ impl World {
             level: c.level,
             dir: c.dir,
             load: c.occupants.len(),
+            load_kg: c.load_kg as f32,
             capacity: self.cfg.cars[id].capacity_rated,
             pending_calls: c.assigned.len(),
             stalled: c.phase == CarPhase::Stalled,

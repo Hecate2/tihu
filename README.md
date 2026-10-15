@@ -197,8 +197,9 @@ impl Router for MyRouter {
 | 某个参数代表什么 | [`docs/MODEL.md`](docs/MODEL.md) |
 | 代码怎么分层 | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) |
 | 怎么写调度算法 | [`docs/DISPATCH_API.md`](docs/DISPATCH_API.md) |
-| 有多快 | [`docs/PERFORMANCE.md`](docs/PERFORMANCE.md) |
+| 多快 | [`docs/PERFORMANCE.md`](docs/PERFORMANCE.md) |
 | 能不能上 GPU | [`docs/GPU.md`](docs/GPU.md) |
+| 能不能训强化学习 | [`docs/RL.md`](docs/RL.md) |
 | 下一步做什么 | [`docs/PLAN.md`](docs/PLAN.md) |
 
 ---

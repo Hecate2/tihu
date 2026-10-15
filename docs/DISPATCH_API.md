@@ -111,6 +111,24 @@ pub struct SystemView<'a> {
 | `load_ratio()` | 载客率 |
 | `has_work()` | 名片下还有没有没干完的活 |
 
+### 3.1 算法能看到的整车状态
+
+| 位置 | 有什么 |
+| --- | --- |
+| `RunView.load` | 在梯人数 |
+| `RunView.load_kg` | 当前载重，公斤 |
+| `RunView.car_calls` | 在梯乘客的目的层，升序 |
+| `RunView.mine` | 这台车名下的外呼 |
+| `RunView.system.cars` | 每台车的位置、方向、人数、载重、名下待办数、是否僵住 |
+| `RunView.system.pending` | 还没派出去的外呼 |
+| `RunView.system.all_calls` | 全部外呼，含已分配 |
+| `RunView.system.queue_len` | 每层电梯厅里现在有几个人 |
+| `RunView.floor_height` | 层高 |
+
+`CarBrief` 里带了 `load_kg`，所以派梯算法可以直接看载重，不必只看人数。
+按方向分开的每层等待人数还没有暴露，需要的话再加。见 [`RL.md`](RL.md) 第 4.2 节
+关于把视图拍成定长观测向量的讨论。
+
 **楼层编号是 `i16`，层号 1 是主入口层，住宅从 2 起，地下是负数。**
 写算法时不要假设层号从 1 开始就有住户，也不要假设只有下行客。
 

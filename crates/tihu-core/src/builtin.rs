@@ -519,6 +519,7 @@ mod tests {
             level,
             dir,
             load,
+            load_kg: load as f32 * 66.0,
             capacity: 13,
             pending_calls: 0,
             stalled,
