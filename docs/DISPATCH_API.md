@@ -1,8 +1,9 @@
 # 调度算法接口 DISPATCH_API
 
-这份文档只有一个目的：**让你在 100 行以内写出一个新的调度算法，并且不改动 `tihu-core` 的任何一行。**
+这份文档只有一个目的：**让你在 100 行以内写出一个新的调度算法，并且不改动
+`tihu-core` 的任何一行。**
 
-如果这个承诺没有兑现，那是本仓库的 bug，请直接提。
+如果这个承诺没有兑现，那是本仓库的 bug。请直接提。
 
 ---
 
@@ -10,86 +11,129 @@
 
 | 替换点 | 管什么 | 什么时候被调用 |
 | --- | --- | --- |
-| `Assigner` | 一条新外呼派给哪台轿厢 | 每次产生新外呼，以及每次重分配检查 |
-| `Router` | 一台轿厢往哪走、在哪停 | 每到达一层一次 |
-| `Boarding` | 谁有权上车、什么时候关门 | 每次停靠若干次 |
+| `Router` | 一台轿厢下一程去哪一层 | 每次轿厢停稳、以及每次它重新决策时 |
+| `Assigner` | 一条外呼派给哪台轿厢 | 每次产生新外呼，以及每次重分配检查 |
+| `Boarding` | 谁有权上车 | 每次停靠，每位候选乘客一次 |
 
-三者互不耦合。绝大多数研究者只需要写 `Router`。`Boarding` 留给想专门研究上下车规则的人：排队礼让的先后顺序、接近满载时的拒挤行为、以及超载之后由谁退出。
-
----
-
-## 2. 算法能看到什么
-
-所有替换点拿到的都是**只读视图**。算法不许改动世界，只能回答决策问题。这条约束让内核可以安全地随时重算。
-
-```rust
-pub enum Dir { Up, Down, None }
-
-pub struct SystemView<'a> {
-    pub now: f64,
-    pub cars: &'a [CarBrief],        // 每台轿厢的位置、方向、载客率
-    pub pending: &'a [HallCall],     // 尚未分配给任何轿厢的外呼
-    pub assigned: &'a Assignment,    // 已分配的外呼与归属
-    pub queue_len: &'a [(usize, usize)], // 每层等待人数，(上行, 下行)
-}
-
-pub struct RunView<'a> {
-    pub now: f64,
-    pub car: CarId,
-    pub at_floor: u16,
-    pub heading: Dir,
-    pub load: usize,
-    pub capacity_rated: usize,
-    pub load_ratio: f64,
-    pub onboard: &'a [PaxIdx],       // 在梯名单
-    pub will_alight: &'a dyn Fn(u16) -> bool, // 这一层是否有人要出
-    pub car_calls: &'a FloorSet,     // 内选登记的楼层
-    pub mine: &'a CallSet,           // 派给本轿厢且未服务的外呼
-    pub system: &'a SystemView<'a>,  // 整机视图
-}
-```
-
-载客率直接给到 `load_ratio`，省得算法自己算，也保证所有算法看到同一个定义。
-
-**地下室楼层的编号是负層**,用 `i16` 表示层数，零点是一层大堂。写算法时不要假设层号楼从 1 开始。
+三者互不耦合。绝大多数研究者只需要写 `Router`。
 
 ---
 
-## 3. `Router`
+## 2. 最重要的一条：停靠决策归内核
+
+**算法只回答「下一程去哪」，不回答「这一层停不停」。**
+
+内核沿这条腿逐层推进，每到一层自己判断要不要停，判据只有两条：
+
+1. 车上有乘客要在这一层下
+2. 这一层在这条腿的预定停靠表里
+
+预定停靠表由内核在开腿时填，来源是这台轿厢名下的同向外呼与车上乘客的目的层。
+外呼在途中被指派进来时，内核先做一次制动可行性检查，来得及才插进去。
+
+这条分工解决了两类老问题。算法再怎么写都不会「路过该停的楼层」，也不会「停在
+没活可干的楼层」。你不需要在算法里处理这些。
+
+因此 `Router` 只有一个方法。
 
 ```rust
 pub trait Router {
     fn name(&self) -> &'static str;
 
-    /// 轿厢即将经过一层时被调用。返回 true 就减速停靠
-    fn should_stop(&self, v: &RunView<'_>) -> bool;
-
-    /// 停完之后决定下一程。返回目标楼层与方向
+    /// 决定轿厢下一程去哪。返回 `Leg::Park` 表示原地待命
     fn next_leg(&self, v: &RunView<'_>) -> Leg;
 
-    /// 完全空闲时干什么
-    fn idle(&self, v: &RunView<'_>) -> Idle;
+    /// 每次仿真开始时调用一次，清掉上一轮留下的私有状态
+    fn reset(&mut self) {}
 }
 
-pub enum Leg { Up(u16), Down(u16), Park }
-pub enum Idle { Hold, GoTo(u16) }
+pub enum Leg {
+    Up(i16),
+    Down(i16),
+    Park,
+}
 ```
 
-`should_stop` 必须只读且幂等。接近某一层的过程中，它可能被调用多次，答案必须前后一致。内核不缓存这个答案，你可以放心依赖当前的真实状态。
+`Leg::Up(20)` 的意思是「接下来开到 20 层去」，方向由目标层与当前层的大小关系决定。
+返回 `Leg::Down(20)` 且车在 10 层，效果与 `Leg::Up(20)` 相同。写清楚方向只是
+为了可读。
 
-### 3.1 内建实现
+还有一个硬约束：**车上有乘客时内核会先送客，不经过 `next_leg`。** 送人是电梯的
+义务，压过一切优化。算法只处理「接了活去哪」与「彻底空闲时停哪」。
+
+---
+
+## 3. 算法能看到什么
+
+所有替换点拿到的都是**只读视图**。算法不许改动世界，只能回答决策问题。
+
+```rust
+pub struct RunView<'a> {
+    pub now: f64,
+    pub car: CarId,
+    pub at_level: f32,          // 当前所在层，可以是小数
+    pub heading: Dir,           // Up / Down / None
+    pub load: usize,            // 在梯人数
+    pub capacity_rated: usize,  // 额定人数
+    pub capacity_crush: usize,  // 物理极限人数
+    pub load_kg: f32,           // 当前载重
+    pub car_calls: &'a [i16],   // 在梯乘客的目的层，升序
+    pub mine: &'a [HallCall],   // 名下未服务的外呼
+    pub system: SystemView<'a>, // 整机视图
+    pub floor_height: f32,
+}
+
+pub struct SystemView<'a> {
+    pub now: f64,
+    pub cars: &'a [CarBrief],   // 每台轿厢的位置、方向、载客率、名下待办数
+    pub pending: &'a [HallCall],   // 还没分配给任何轿厢的外呼
+    pub all_calls: &'a [HallCall], // 全部外呼，含已分配
+    pub queue_len: &'a [u32],      // 每层电梯厅里现在有几个人
+    pub top_level: i16,
+    pub n_cars: usize,
+}
+```
+
+视图里的两个切片直接借用内核的复用缓冲，构造视图不分配内存。算法可以放心在
+热路径上反复调用。
+
+`RunView` 上有一组现成的查询方法，省得你手写循环。
+
+| 方法 | 返回什么 |
+| --- | --- |
+| `level()` | 当前层号，`at_level` 取整 |
+| `will_alight(level)` | 在梯乘客里有没有人要在这一层下 |
+| `has_call(level, dir)` | 名下有没有这一条外呼 |
+| `has_call_up()` / `has_call_down()` | 名下有没有任何上行业务 / 下行业务 |
+| `extreme(dir)` | 名下该方向外呼里最高或最低的一层 |
+| `highest_car_call()` / `lowest_car_call()` | 在梯乘客目的层的最高或最低 |
+| `highest_pending()` / `lowest_pending()` | 名片下全部任务里最高或最低的一层 |
+| `load_ratio()` | 载客率 |
+| `has_work()` | 名片下还有没有没干完的活 |
+
+**楼层编号是 `i16`，层号 1 是主入口层，住宅从 2 起，地下是负数。**
+写算法时不要假设层号从 1 开始就有住户，也不要假设只有下行客。
+
+---
+
+## 4. 内建实现
 
 | 名字 | 行为 |
 | --- | --- |
-| `collective_scan` | 经典集选。保持方向，把沿途同向外呼和内选服务完，到底才反向。**住宅默认值** |
-| `selective_collective` | 集选加满载直驶。载客率到阈值后掠过同向外呼 |
-| `down_peak_sweep` | 早高峰专用。先上行到最高的任务楼层，再一路下行扫到底 |
-| `eta_optimal` | 每次决策做一次轻量前向推算，取使所有等待者的预计等待之和最小的那个方向 |
-| `destination_group` | 目的层群控。按 `dest_floor` 分组装填 |
+| `collective_scan` | 经典集选。保持方向，把沿途同向外呼与内选服务完，到底才反向 |
+| `selective_collective` | 集选加满载直驶。载客率过阈值后只按内选走 |
+| `down_peak_sweep` | 早高峰专用。先上行到最高任务层，再一路下行扫到底。**默认算法** |
+| `nearest_car` | 派给位置上最近的一台 |
+| `round_robin` | 轮流派遣 |
+| `eta_min` | 派给预计到达最快的那台 |
+| `load_aware_eta` | 到达时间加载客惩罚，还会预判到那层时是不是已经挤满。**默认派梯** |
+| `with_rescue` | 包装器。发现某台轿厢长时间没推进，把它的活改派给别人 |
 
-### 3.2 完整例子
+---
 
-下面是一个真能跑的实现，早高峰下行扫的策略。行数不到三十。
+## 5. 完整例子
+
+下面这个算法能用，而且不到三十行。它就是内建的 `down_peak_sweep`。
 
 ```rust
 use tihu_core::policy::*;
@@ -99,124 +143,119 @@ pub struct DownPeakSweep;
 impl Router for DownPeakSweep {
     fn name(&self) -> &'static str { "down_peak_sweep" }
 
-    fn should_stop(&self, v: &RunView<'_>) -> bool {
-        // 下行时，本层有下行外呼，或者有人在电梯里要到这一层，就停
-        let has_job = v.mine.has(v.at_floor, Dir::Down) || (v.will_alight)(v.at_floor);
-        // 上行途中只跑去最高那层接人，中途不停
-        match v.heading {
-            Dir::Down => has_job,
-            Dir::Up   => v.at_floor == v.mine.highest(),
-            Dir::None => has_job,
-        }
-    }
-
     fn next_leg(&self, v: &RunView<'_>) -> Leg {
         // 名下还有下行任务就继续往下扫
-        if let Some(f) = v.mine.lowest(Dir::Down) { return Leg::Down(f); }
-        if let Some(f) = v.car_calls.lowest() { return Leg::Down(f); }
-        // 下行任务清空了，去接最高的一条任务，然后重新开始往下扫
-        let highest = v.mine.highest().max(v.car_calls.highest());
+        if let Some(f) = v.extreme(Dir::Down) {
+            if f < v.level() { return Leg::Down(f); }
+        }
+        if let Some(f) = v.lowest_car_call() {
+            if f < v.level() { return Leg::Down(f); }
+        }
+        // 下行任务清空了，去接最高的一条，然后重新往下扫
+        let highest = v.highest_pending().or_else(|| v.highest_car_call());
         match highest {
-            Some(f) => Leg::Up(f),
-            None    => Leg::Park,
+            Some(f) if f > v.level() => Leg::Up(f),
+            Some(f) => Leg::Down(f),
+            // 彻底没活，回主入口层待命
+            None => {
+                let lobby = tihu_core::config::LOBBY;
+                if v.level() > lobby { Leg::Down(lobby) }
+                else if v.level() < lobby { Leg::Up(lobby) }
+                else { Leg::Park }
+            }
         }
     }
-
-    fn idle(&self, _v: &RunView<'_>) -> Idle { Idle::GoTo(1) }
 }
 ```
 
-写完之后只需要在注册表里加一行：
-
-```rust
-register_router!("down_peak_sweep", || Box::new(DownPeakSweep));
-```
-
-然后它同时出现在网页的下拉框和命令行的 `--router` 参数里。**整个过程不需要改 `tihu-core` 的任何一行。**
+写完加一行注册，它同时出现在网页下拉框与命令行的 `--router` 参数里。
+**整个过程不需要改 `tihu-core` 的任何一行。**
 
 ---
 
-## 4. `Assigner`
+## 6. `Assigner`
 
 ```rust
 pub trait Assigner {
-    fn name(&self) -> &'static str;
+    fn name(&self) -> &'static str { "unnamed" }
 
-    /// 每个 scenario 开始时调用一次，用来预分配自己的私有状态
-    fn reset(&mut self, cfg: &SimConfig);
+    /// 一条新外呼产生时被调用。返回 None 表示暂时不派
+    fn assign(&self, v: &SystemView<'_>, call: HallCall) -> Option<CarId>;
 
-    /// 一条新外呼产生时被调用，返回派给哪台轿厢。返回 None 表示暂时不派
-    fn assign(&mut self, v: &SystemView<'_>, call: HallCall) -> Option<CarId>;
+    /// 每个事件之后调用一次，允许推翻先前的分配
+    fn reassign(&self, v: &SystemView<'_>, owned: &mut [Option<CarId>]) {}
 
-    /// 每个事件之后调用一次，允许你推翻先前的分配结果
-    fn reassign(&mut self, v: &SystemView<'_>, plan: &mut Assignment) {}
+    fn reset(&mut self) {}
 }
 ```
 
-### 4.1 内建实现
+### 6.1 停靠区域由内核兜底
 
-| 名字 | 行为 |
-| --- | --- |
-| `nearest_car` | 派给当前位置上最近的那台。**简单粗暴的老系统默认值** |
-| `round_robin` | 轮流派遣 |
-| `eta_min` | 派给预计到达最快的那台 |
-| `load_aware_eta` | 到达时间加一个载客惩罚，还会预判「到那一层时是不是已经挤满」。推薦作为基线 |
-| `dest_dispatch` | 目的层派梯。乘客先登记目的楼层，系统指定轿厢 |
+一个算法如果派了一台不停那一层的轿厢去接这条外呼，内核会换一台真正服务的车
+顶上。所以算法不检查停靠区域也不会出错，但会失去对派梯结果的控制。想写得准，
+就自己先筛一遍。
 
-### 4.2 `reassign` 为什么会拉开差距
+### 6.2 `reassign` 为什么会拉开差距
 
-这是最值得写算法的地方。轿厢可能因为超载报警长时间僵在原地，它名下那些未服务的外呼就悬在半空。**层上的人再按一次按钮是没有用的**，灯已经亮着。
+轿厢可能因为超载报警长时间僵在原地，名下那些未服务的外呼就悬在半空。
+**层上的人再按一次按钮是没有用的**，灯已经亮着。
 
-不支持重分配的 `Assigner` 会让这些人一直等到僵局自己解除。支持重分配的 `Assigner` 一旦发现某台轿厢长时间没有推进,就把任务改派给别人。
-
-同一个场景下，两种做法的平均等待时间常常差出好几倍。详见 `docs/MODEL.md` 第 8.4 节。
+不支持重分配的 `Assigner` 会让这些人一直等到僵局自己解除。支持重分配的
+`Assigner` 一旦发现某台轿厢长时间没推进，就把任务改派给别人。同一个场景下
+两种做法的平均等待常常差出好几倍。见 [`MODEL.md`](MODEL.md) 第 8 节。
 
 ---
 
-## 5. `Boarding`
+## 7. `Boarding`
 
 ```rust
 pub trait Boarding {
-    /// 逐个考察队首的同行团，决定它能不能上
-    fn try_board(&self, ctx: &mut BoardCtx<'_>) -> Verdict;
+    fn name(&self) -> &'static str { "default" }
 
-    /// 车门当前是否该关
-    fn close_now(&self, v: &RunView<'_>) -> bool;
+    /// 考察一位乘客是否上车
+    fn admit_one(&self, s: &AdmitSample, tol: f64) -> Verdict;
+}
+
+pub enum Verdict {
+    Admit,     // 可以上
+    NoSpace,   // 真的没位子了
+    Declined,  // 有位子，但这位乘客不愿意挤
 }
 ```
 
-默认实现 `DefaultBoarding` 就是 `MODEL.md` 第 5 节写好的那套规则：方向匹配、空间够、逐人掷拒挤判定。
+`AdmitSample` 给出载客率、空位、这位乘客已经等了多久、以及载重相对额定的倍数。
 
-想在研究方向上做文章的，通常换的是这两件事：
+**`NoSpace` 与 `Declined` 必须分开。** 前者说明运力真不够，后者说明运力够但人
+不愿意。混成一个数会让「这个楼盘要不要加电梯」的判断失真。
 
-- 排队礼让规则。默认按到达时刻先来后到。可以改成离门近者优先，或者随机哄抢
-- 超载后的处理。默认就是我们 MODEL.md 写好的僵持循环，可以改成「最后上车的人必然退出」
-
-绝大多数评测不需要动这里。**不确定要不要动，就不要动。**
+车门什么时候关不归算法管，内核按开关门时序自己算。
 
 ---
 
-## 6. 怎么公正地比两个算法
+## 8. 怎么公正地比两个算法
 
-### 6.1 必须用同一批人
+### 8.1 必须用同一批人
 
-两个算法要比，必须让它们服务同一批乘客。`ARCHITECTURE.md` 第 5 节解释了随机流的分流做法。
+所有乘客在仿真开始之前一次性生成完。同一个种子配任何算法，楼里都是同一批人。
+这是公平比较的前提，也是 [`ARCHITECTURE.md`](ARCHITECTURE.md) 第 5 节分流做法的
+目的。
 
-### 6.2 用配对差值，不要比均值
+### 8.2 用配对差值，不要比均值
 
 朴素做法是分别算两个算法的均值再相减。噪声大得让人绝望。
 
-正确做法是**同一个种子跑两个算法，逐种子取差值**，再对差值序列做均值与置信区间。公共随机数把噪声消掉了一大截，同样的工作量能把结论的可信度提高一个量级。
+正确做法是**同一个种子跑两个算法，逐种子取差值**，再对差值序列做均值与置信
+区间。公共随机数把噪声消掉了一大截。
 
 ```
 diff_i = 指标(算法A, 种子i) − 指标(算法B, 种子i)
 报告 mean(diff) 与 bootstrap 95% 置信区间
 ```
 
-### 6.3 一条命令
+### 8.3 一条命令
 
 ```
-tihu-cli bench --routers collective_scan,eta_optimal --assigners nearest_car,load_aware_eta \
+tihu-cli bench --routers collective_scan,down_peak_sweep --assigners nearest_car,load_aware_eta \
                --suite std --seeds 200 --out table.md
 ```
 
@@ -226,31 +265,36 @@ tihu-cli bench --routers collective_scan,eta_optimal --assigners nearest_car,loa
 | --- | --- | --- | --- | --- | --- | --- |
 | 待跑 | 待跑 | 待跑 | 待跑 | 待跑 | 待跑 | 待跑 |
 
-<!-- TODO: 这张表由 `make bench-table` 实跑生成，不许手填 -->
+<!-- TODO: 这张表由 tihu-cli bench 实跑生成，不许手填 -->
+
+`tihu-cli` 目前还是空壳，这条命令还没实现。见 [`PLAN.md`](PLAN.md)。
 
 ---
 
-## 7. 标准测试套件
+## 9. 标准测试套件
 
-`tihu-cli bench --suite std` 会跑下面这组固定场景。每个新算法都应该能在这里交出成绩。
+`tihu-cli bench --suite std` 将来会跑下面这组固定场景。每个新算法都应该能在这里
+交出成绩。
 
 | 场景 | 配置 | 考什么 |
 | --- | --- | --- |
-| `std_residential` | 18 层二梯四户 | 常规住宅 |
-| `std_tall` | 33 层二梯六户 | 高层高密度 |
-| `std_underserved` | 33 层一梯四户 | 运力明显不够时的表现 |
-| `std_evening` | 晚高峰上行 | 反向客流的处理 |
+| `std_residential` | 十八层住宅，二梯四户 | 常规住宅 |
+| `std_tall` | 三十三层住宅，二梯六户 | 高层高密度 |
+| `std_underserved` | 三十三层住宅，一梯四户 | 运力明显不够时的表现 |
 | `stress_gaming` | 三成的人反向叫梯 | 人人抢座的环境下的稳健性 |
-| `stress_stalled_car` | 开启超载死锁 | **轿厢长时间停滞时的恢复能力** |
+| `stress_stalled_car` | 开启超载死锁 | 轿厢长时间停滞时的恢复能力 |
 | `stress_mixed_traffic` | 双向均衡客流 | 两向需求接近时的调度能力 |
 
 ---
 
-## 8. 常见坑
+## 10. 常见坑
 
-1. **别在 `Router` 里跨帧缓存状态却不处理 `reset`。** 忘了的话，第二次运行会带着上一次的脏状态。
-2. **`should_stop` 不许有副作用。** 它是被反复调用的，改了世界会让内核的状态和它的记录对不上。
-3. **别忘了地下室。** 层数用 `i16`，1 以下还有 B1、B2。
-4. **别假设只有下行客。** 早高峰仍然有百分之几的上行客流，写 `DownPeakSweep` 这种专用算法时要显式处理它。
-5. **别用 `f64::NAN` 当「没有估价」。** 返回一个枚举，让类型系统替你兜着。
-6. **不要为了让自己的算法好看去改 `Boarding`。** 评测时统一用默认规则，换规则请单独说明，别混在一张表里。
+1. **别在 `Router` 里跨帧缓存状态却不处理 `reset`。** 忘了的话第二次运行会带着
+   上一次的脏状态。
+2. **别假设自己能决定停不停。** 你只选目标层，停靠由内核定。想在途中插一次停靠，
+   只能通过改目标层实现。
+3. **别忘了地下室与主入口层。** 层号是 `i16`，1 是主入口，负数在地下。
+4. **别假设只有下行客。** 早高峰仍有百分之几的上行客流。
+5. **别拿 `NaN` 当「没有估价」。** 返回一个枚举，让类型系统替你兜着。
+6. **不要为了让自己的算法好看去改 `Boarding`。** 评测时统一用默认规则，换规则
+   请单独说明，别混在一张表里。
