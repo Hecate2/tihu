@@ -232,6 +232,8 @@ pub struct Metrics {
     pub ghost_stops: usize,
     /// 满载直驶跳过的外呼数
     pub full_bypasses: usize,
+    /// 因为制动来不及而越过的外呼层数。高速梯在接下来几层都停不了时会累积
+    pub overshoots: usize,
 }
 
 impl Metrics {

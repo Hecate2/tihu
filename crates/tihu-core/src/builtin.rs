@@ -5,7 +5,7 @@
 
 use crate::config::Boarding as BoardCfg;
 use crate::motion::Dir;
-use crate::policy::{AdmitSample, Assigner, Boarding, CarId, HallCall, Idle, Leg, RunView, SystemView, Verdict};
+use crate::policy::{AdmitSample, Assigner, Boarding, CarId, HallCall, Leg, RunView, SystemView, Verdict};
 
 /// 经典集选。保持方向，把沿途同向外呼和内选服务完，到底才反向。
 ///
@@ -27,19 +27,6 @@ impl CollectiveScan {
 impl crate::policy::Router for CollectiveScan {
     fn name(&self) -> &'static str {
         "collective_scan"
-    }
-
-    fn should_stop(&self, v: &RunView<'_>) -> bool {
-        if v.will_alight(v.level()) {
-            return true;
-        }
-        match v.heading {
-            // 只接同向的外呼。同向没人了就准备到底反向
-            Dir::Up => v.has_call(v.level(), Dir::Up),
-            Dir::Down => v.has_call(v.level(), Dir::Down),
-            // 停着不动时只在有事可做时才开门，否则会空转
-            Dir::None => v.has_call_up() || v.has_call_down(),
-        }
     }
 
     fn next_leg(&self, v: &RunView<'_>) -> Leg {
@@ -74,10 +61,6 @@ impl crate::policy::Router for CollectiveScan {
             }
         }
     }
-
-    fn idle(&self, _v: &RunView<'_>) -> Idle {
-        Idle::Hold
-    }
 }
 
 /// 集选加满载直驶。载客率到阈值之后不再响应外呼，直接掠过。
@@ -95,49 +78,31 @@ impl crate::policy::Router for SelectiveCollective {
         "selective_collective"
     }
 
-    fn should_stop(&self, v: &RunView<'_>) -> bool {
-        if v.will_alight(v.level()) {
-            return true;
-        }
-        if v.load_ratio() >= self.bypass_ratio {
-            // 满载直驶。但名下这些外呼不能就此丢掉，只是这次不服务
-            return false;
-        }
-        CollectiveScan.should_stop(v)
-    }
-
     fn next_leg(&self, v: &RunView<'_>) -> Leg {
-        if v.load_ratio() >= self.bypass_ratio {
-            // 跳过外呼，只按内选走
-            let up = match v.heading {
-                Dir::Down => false,
-                _ => true,
-            };
-            if up {
-                match v.highest_car_call() {
-                    Some(t) if t > v.level() => return Leg::Up(t),
-                    _ => {}
-                }
-                if let Some(t) = v.lowest_car_call() {
-                    if t < v.level() {
-                        return Leg::Down(t);
-                    }
-                }
-            } else if let Some(t) = v.lowest_car_call() {
-                if t < v.level() {
-                    return Leg::Down(t);
-                }
-            } else if let Some(t) = v.highest_car_call() {
-                if t > v.level() {
-                    return Leg::Up(t);
-                }
+        if v.load_ratio() < self.bypass_ratio {
+            return CollectiveScan.next_leg(v);
+        }
+        // 满载直驶：只按内选走，不再绕去外呼层。内选也没有就原地待命
+        let here = v.level();
+        let up = !matches!(v.heading, Dir::Down);
+        let above = v.highest_car_call().filter(|&t| t > here);
+        let below = v.lowest_car_call().filter(|&t| t < here);
+        if up {
+            if let Some(t) = above {
+                return Leg::Up(t);
+            }
+            if let Some(t) = below {
+                return Leg::Down(t);
+            }
+        } else {
+            if let Some(t) = below {
+                return Leg::Down(t);
+            }
+            if let Some(t) = above {
+                return Leg::Up(t);
             }
         }
-        CollectiveScan.next_leg(v)
-    }
-
-    fn idle(&self, v: &RunView<'_>) -> Idle {
-        CollectiveScan.idle(v)
+        Leg::Park
     }
 }
 
@@ -150,25 +115,6 @@ pub struct DownPeakSweep;
 impl crate::policy::Router for DownPeakSweep {
     fn name(&self) -> &'static str {
         "down_peak_sweep"
-    }
-
-    fn should_stop(&self, v: &RunView<'_>) -> bool {
-        if v.will_alight(v.level()) {
-            return true;
-        }
-        match v.heading {
-            Dir::Down => v.has_call(v.level(), Dir::Down),
-            // 上行途中只跑去最高那层接人，中途不停。
-            // 早高峰名下几乎全是下行任务，所以这里取「不分方向」的最高层，
-            // 只按上行方向去找那一层找不到，那是逻辑错误。
-            Dir::Up => v.highest_pending().map(|h| h == v.level()).unwrap_or(false),
-            // 停着不动时，只在真的有事可做时才开门。
-            // 这里若无条件返回 true，轿厢每次醒来都会进一次空停靠，
-            // 形成零时刻死循环。
-            Dir::None => {
-                v.has_call_up() || v.has_call_down() || v.will_alight(v.level())
-            }
-        }
     }
 
     fn next_leg(&self, v: &RunView<'_>) -> Leg {
@@ -188,12 +134,18 @@ impl crate::policy::Router for DownPeakSweep {
         match highest {
             Some(f) if f > v.level() => Leg::Up(f),
             Some(f) => Leg::Down(f),
-            None => Leg::Park,
+            // 彻底没活，回主入口层待命
+            None => {
+                let lobby = crate::config::LOBBY;
+                if v.level() > lobby {
+                    Leg::Down(lobby)
+                } else if v.level() < lobby {
+                    Leg::Up(lobby)
+                } else {
+                    Leg::Park
+                }
+            }
         }
-    }
-
-    fn idle(&self, _v: &RunView<'_>) -> Idle {
-        Idle::GoTo(0)
     }
 }
 
@@ -491,12 +443,10 @@ mod tests {
         HallCall { id: level as u32, level, dir, owner: Some(0), waiting: 1 }
     }
 
-    /// 上行时只接上行外呼，同向没人了就反向。
+    /// 集选：上行时挑最高的上行业务，同向没人了就反向。
     #[test]
     fn collective_scan_goes_up_first() {
         let v = rv(5.0, Dir::Up, vec![call(20, Dir::Up)], vec![], 0);
-        assert!(CollectiveScan.should_stop(&rv(20.0, Dir::Up, vec![call(20, Dir::Up)], vec![], 0)));
-        assert!(!CollectiveScan.should_stop(&rv(12.0, Dir::Up, vec![call(20, Dir::Up)], vec![], 0)));
         assert_eq!(CollectiveScan.next_leg(&v), Leg::Up(20));
     }
 
@@ -507,52 +457,44 @@ mod tests {
         assert_eq!(CollectiveScan.next_leg(&v), Leg::Down(2));
     }
 
-    /// 有人要出去的那一层一定要停，哪怕没有外呼。
+    /// 有人要出去的那一层，路由要选它，内核才不会路过。
     #[test]
-    fn always_stops_where_people_exit() {
+    fn collective_scan_routes_to_rider_dest() {
         let v = rv(8.0, Dir::Up, vec![], vec![8, 20], 2);
-        assert!(CollectiveScan.should_stop(&v));
+        // 当前位置就是 8，最近的内选是 8，回到 8 没有意义，取下一个
+        assert_eq!(CollectiveScan.next_leg(&v), Leg::Up(20));
     }
 
-    /// 载客率到阈值之后满载直驶，但有人要出去还是要停。
+    /// 满载直驶时算法只按内选走，不再绕去外呼层。
     #[test]
     fn selective_bypasses_calls_when_full() {
         let sc = SelectiveCollective { bypass_ratio: 0.8 };
         // 13 人的轿厢装了 11 人，载客率 0.846，超过阈值
-        let full = rv(12.0, Dir::Up, vec![call(12, Dir::Up)], vec![], 11);
-        assert!(!sc.should_stop(&full), "满载直驶时不该停");
-        // 但这层有人要出去
-        let exiting = rv(12.0, Dir::Up, vec![], vec![12], 11);
-        assert!(sc.should_stop(&exiting), "有人下车时必须停");
+        let full = rv(12.0, Dir::Up, vec![call(20, Dir::Up)], vec![], 11);
+        assert_eq!(sc.next_leg(&full), Leg::Park, "满载直驶时不该再跑去接外呼");
     }
 
     #[test]
     fn selective_below_threshold_behaves_like_collective() {
         let sc = SelectiveCollective { bypass_ratio: 0.8 };
-        let v = rv(12.0, Dir::Up, vec![call(12, Dir::Up)], vec![], 3);
-        assert!(sc.should_stop(&v));
+        let v = rv(12.0, Dir::Up, vec![call(20, Dir::Up)], vec![], 3);
+        assert_eq!(sc.next_leg(&v), Leg::Up(20));
     }
 
-    /// 下行扫描：上行途中只在最高任务层停。
+    /// 下行扫描：下方没有任务时，先上行到最高的任务层。
     #[test]
-    fn sweep_only_stops_at_top_on_the_way_up() {
+    fn sweep_climbs_to_the_highest_pending() {
         let s = DownPeakSweep;
-        let mine = vec![call(33, Dir::Up), call(20, Dir::Down)];
-        // 到了最高任务层要停
-        assert!(s.should_stop(&rv(33.0, Dir::Up, mine.clone(), vec![], 0)), "最高任务层要停");
-        // 中途不停，哪怕那一层也有下行任务
-        assert!(!s.should_stop(&rv(28.0, Dir::Up, mine.clone(), vec![], 0)), "中途不停");
-        // 早高峰全是下行任务时，上行接人也该去最高的那层
-        let down_only = vec![call(30, Dir::Down), call(12, Dir::Down)];
-        assert!(s.should_stop(&rv(30.0, Dir::Up, down_only.clone(), vec![], 0)));
-        assert!(!s.should_stop(&rv(20.0, Dir::Up, down_only, vec![], 0)));
+        // 任务都在上方时，先上到最高的那层，再开始往下扫
+        let above_only = vec![call(30, Dir::Down), call(25, Dir::Down)];
+        assert_eq!(s.next_leg(&rv(20.0, Dir::Up, above_only, vec![], 0)), Leg::Up(30));
     }
 
     #[test]
     fn sweep_serves_down_calls_on_the_way_down() {
         let s = DownPeakSweep;
-        let v = rv(20.0, Dir::Down, vec![call(20, Dir::Down)], vec![], 0);
-        assert!(s.should_stop(&v));
+        let v = rv(20.0, Dir::Down, vec![call(12, Dir::Down), call(3, Dir::Down)], vec![], 0);
+        assert_eq!(s.next_leg(&v), Leg::Down(3));
     }
 
     /// 把传入的 Vec 泄漏成 `'static`，测试专用。
