@@ -129,7 +129,7 @@ function stopsFor(i, n, top, basement) {
 // 把界面上的值写进配置对象。只碰用户能调的那些字段，预设带进来的其他内容
 // （比如层间客流的每股占比）一律原样留着。
 function applyUi(cfg) {
-  const top = num(ui.res_floors) + 1; // 层号 1 是主入口层
+  const top = num(ui.res_floors); // 填 N 就是 1 到 N 层，主入口层是 1 层
   const units = num(ui.units);
   const gfr = ui.gfr.checked;
 
@@ -202,8 +202,9 @@ function defaultFlows(top) {
 
 // 反过来：把一份配置回填到控件上，预设按钮点下去就走这条。
 function loadIntoUi(cfg) {
-  ui.res_floors.value = cfg.building.top_level - 1;
-  ui.units.value = cfg.building.units_per_floor[1] || 4;
+  ui.res_floors.value = cfg.building.top_level;
+  // 每层户数的代表值取第一格非零的。一层是大堂时第一格是 0，跳过它。
+  ui.units.value = cfg.building.units_per_floor.find((x) => x > 0) || 4;
   ui.ppu.value = cfg.building.persons_per_unit;
   ui.fh.value = cfg.building.floor_height;
   ui.basement.value = cfg.building.basement_levels || 0;

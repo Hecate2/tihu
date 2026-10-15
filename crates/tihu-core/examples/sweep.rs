@@ -119,7 +119,7 @@ fn section(title: &str, note: &str) {
 
 fn main() {
     println!("全部数字由本文件实跑得出，每个点五个种子取平均。");
-    println!("层号 1 是主入口层，所以「十八层住宅」的顶层号是 19。");
+    println!("层号 1 是主入口层，所以「18 层住宅」就是 1 到 18 层，顶层号 18。");
 
     // ---------------- 梯数 ----------------
     section(
@@ -194,7 +194,7 @@ fn main() {
         ("往返 s", 8),
     ]);
     t.head();
-    let top = 34;
+    let top = 33;
     let variants: [(&str, Vec<StopSpec>); 4] = [
         ("两台都全停", vec![StopSpec::All, StopSpec::All]),
         ("单双层", vec![StopSpec::parity(true), StopSpec::parity(false)]),
