@@ -1,0 +1,970 @@
+//! 仿真配置。
+//!
+//! 所有默认值与校验规则见 `docs/MODEL.md`。标「待标定」的常数在这里挂着
+//! `TODO(calibration)`，标定完成后删掉这条注释并把出处写进 MODEL。
+
+use crate::motion::{DoorTiming, MotionProfile};
+
+/// 楼层编号约定。一层大堂是 0，住宅从 1 开始，地下是负数。
+pub const LOBBY: i16 = 0;
+
+/// 一栋楼。
+#[derive(Debug, Clone)]
+pub struct Building {
+    /// 住宅层数，不含大堂
+    pub floors: i16,
+    /// 层高，米
+    pub floor_height: f32,
+    /// 每层户数，长度必须等于 `floors`，第 0 项是第一层住宅
+    pub units_per_floor: Vec<u8>,
+    /// 户均人数
+    pub persons_per_unit: f32,
+    /// 地下层数，0 表示没有
+    pub basement_levels: i16,
+    /// 每层套内面积，米²。给了才会做密度校验
+    pub floor_area_m2: Option<f32>,
+    /// 第一层是否改成了架空层或商铺
+    pub ground_floor_residential: bool,
+    /// 顶层是否为跃层，户数减半
+    pub top_floor_duplex: bool,
+    /// 最小套型面积，米²
+    pub min_unit_area_m2: f32,
+    /// 人均最低面积，米²
+    pub min_area_per_person_m2: f32,
+}
+
+impl Default for Building {
+    fn default() -> Self {
+        Self {
+            floors: 18,
+            floor_height: 3.0,
+            units_per_floor: vec![4; 18],
+            persons_per_unit: 2.8,
+            basement_levels: 0,
+            floor_area_m2: None,
+            ground_floor_residential: true,
+            top_floor_duplex: false,
+            min_unit_area_m2: 45.0, // TODO(calibration) 对照住宅设计规范条文
+            min_area_per_person_m2: 20.0, // TODO(calibration)
+        }
+    }
+}
+
+impl Building {
+    /// 某层实际有几户。
+    pub fn units_at(&self, level: i16) -> u8 {
+        if level < 1 || level > self.floors {
+            return 0;
+        }
+        let mut n = self.units_per_floor[(level - 1) as usize];
+        if self.top_floor_duplex && level == self.floors {
+            n = (n / 2).max(1);
+        }
+        if !self.ground_floor_residential && level == 1 {
+            n = 0;
+        }
+        n
+    }
+
+    /// 某层住多少人。
+    pub fn residents_at(&self, level: i16) -> usize {
+        (self.units_at(level) as f32 * self.persons_per_unit).round() as usize
+    }
+
+    /// 全楼住户总数。
+    pub fn total_residents(&self) -> usize {
+        (1..=self.floors).map(|f| self.residents_at(f)).sum()
+    }
+
+    /// 最高住宅层的绝对高度，米。
+    pub fn roof_height(&self) -> f64 {
+        self.floors as f64 * self.floor_height as f64
+    }
+
+    /// 某个楼层的绝对高度，米。地下层往下算。
+    pub fn level_height(&self, level: i16) -> f64 {
+        level as f64 * self.floor_height as f64
+    }
+}
+
+/// 一台轿厢的规格。
+#[derive(Debug, Clone)]
+pub struct CarSpec {
+    /// 额定载重，公斤
+    pub rated_load_kg: f32,
+    /// 额定载客人数，等于额定载重除以 75
+    pub capacity_rated: usize,
+    /// 上行曲线
+    pub up: MotionProfile,
+    /// 下行曲线
+    pub down: MotionProfile,
+    /// 开关门时序
+    pub doors: DoorTiming,
+}
+
+impl Default for CarSpec {
+    fn default() -> Self {
+        Self {
+            rated_load_kg: 1000.0,
+            capacity_rated: 13,
+            up: MotionProfile::default(),
+            down: MotionProfile::default(),
+            doors: DoorTiming::default(),
+        }
+    }
+}
+
+impl CarSpec {
+    /// 由额定载重推出额定载客人数。行业常规按每人 75 公斤折算。
+    pub fn from_load(rated_load_kg: f32) -> Self {
+        let cap = (rated_load_kg / 75.0).round().max(1.0) as usize;
+        Self { rated_load_kg, capacity_rated: cap, ..Self::default() }
+    }
+}
+
+/// 客流模式。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Pattern {
+    /// 早高峰下行
+    MorningDown,
+    /// 晚高峰上行
+    EveningUp,
+    /// 中午双向
+    NoonMixed,
+}
+
+impl Pattern {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Pattern::MorningDown => "morning_down",
+            Pattern::EveningUp => "evening_up",
+            Pattern::NoonMixed => "noon_mixed",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "morning_down" => Some(Pattern::MorningDown),
+            "evening_up" => Some(Pattern::EveningUp),
+            "noon_mixed" => Some(Pattern::NoonMixed),
+            _ => None,
+        }
+    }
+}
+
+/// 客流配置。
+#[derive(Debug, Clone)]
+pub struct Traffic {
+    pub pattern: Pattern,
+    /// 高峰窗口长度，秒
+    pub window_s: f64,
+    /// 窗口内多大比例的住户离家
+    pub departure_ratio: f32,
+    /// 反向客流的占比，取下行总量的这个倍数
+    pub reverse_ratio: f32,
+    /// 强度曲线左参数
+    pub peak_alpha: f32,
+    /// 强度曲线右参数
+    pub peak_beta: f32,
+    /// 同户乘客在这个时间窗内到达就并成一个同行团，秒
+    pub party_window_s: f64,
+    /// 同行团里小孩的人数分布参数。带小孩的团才有
+    pub child_party_ratio: f32,
+}
+
+impl Default for Traffic {
+    fn default() -> Self {
+        Self {
+            pattern: Pattern::MorningDown,
+            window_s: 3600.0,
+            departure_ratio: 0.55,
+            reverse_ratio: 0.08, // TODO(calibration)
+            peak_alpha: 2.5,
+            peak_beta: 2.5,
+            party_window_s: 20.0,
+            child_party_ratio: 0.35, // TODO(calibration) 早高峰要送小孩上学
+        }
+    }
+}
+
+/// 乘客的按键策略。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Strategy {
+    /// 只按真实方向
+    Honest,
+    /// 上下都按，哪趟先来上哪趟
+    PressBoth,
+    /// 只按上行，跟着轿厢折返再下来
+    PressUpOnly,
+    /// 同时呼叫多台
+    MultiCall,
+}
+
+impl Strategy {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Strategy::Honest => "honest",
+            Strategy::PressBoth => "press_both",
+            Strategy::PressUpOnly => "press_up_only",
+            Strategy::MultiCall => "multi_call",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "honest" => Some(Strategy::Honest),
+            "press_both" => Some(Strategy::PressBoth),
+            "press_up_only" => Some(Strategy::PressUpOnly),
+            "multi_call" => Some(Strategy::MultiCall),
+            _ => None,
+        }
+    }
+}
+
+/// 各策略占多大比例，会被归一化。
+#[derive(Debug, Clone)]
+pub struct StrategyMix {
+    pub honest: f64,
+    pub press_both: f64,
+    pub press_up_only: f64,
+    pub multi_call: f64,
+}
+
+impl Default for StrategyMix {
+    /// 默认全员老实。
+    fn default() -> Self {
+        Self { honest: 1.0, press_both: 0.0, press_up_only: 0.0, multi_call: 0.0 }
+    }
+}
+
+impl StrategyMix {
+    /// 按比例抽一个策略。用独立的策略流，所以改算法不会挪位。
+    pub fn pick(&self, u: f64) -> Strategy {
+        let total = self.honest + self.press_both + self.press_up_only + self.multi_call;
+        if total <= 0.0 {
+            return Strategy::Honest;
+        }
+        let mut acc = self.honest / total;
+        if u < acc {
+            return Strategy::Honest;
+        }
+        acc += self.press_both / total;
+        if u < acc {
+            return Strategy::PressBoth;
+        }
+        acc += self.press_up_only / total;
+        if u < acc {
+            return Strategy::PressUpOnly;
+        }
+        Strategy::MultiCall
+    }
+
+    /// 归一化后的四元组，供演化更新使用。
+    pub fn normalized(&self) -> [f64; 4] {
+        let total = self.honest + self.press_both + self.press_up_only + self.multi_call;
+        if total <= 0.0 {
+            return [1.0, 0.0, 0.0, 0.0];
+        }
+        [
+            self.honest / total,
+            self.press_both / total,
+            self.press_up_only / total,
+            self.multi_call / total,
+        ]
+    }
+}
+
+/// 走楼梯的配置。
+///
+/// 走楼梯是一个**行为**模型，不是一个物理模型。住户不会做「电梯全程耗时与
+/// 爬楼全程耗时」这种全局比较，他们凭日常经验：两三楼的邻居天天爬，
+/// 八楼以上的人想都不会想。所以这里用两个参数刻画意愿：
+/// 一层楼的人有多大可能走，以及这个意愿随层数衰减多快。
+///
+/// 耗时与费力仍然要算，因为它们决定住户在「打算走」之后会不会反悔。
+#[derive(Debug, Clone)]
+pub struct Stairs {
+    /// 是否启用
+    pub enabled: bool,
+    /// 每层下行秒数
+    pub per_floor_s: f64,
+    /// 每层费力惩罚，折算成秒
+    pub per_floor_effort_s: f64,
+    /// 走到楼梯间的固定开销
+    pub fixed_s: f64,
+    /// 比较优势上的判定噪声，秒。人对几十秒的差异才敏感
+    pub tau_s: f64,
+    /// 上行比下行难受多少倍
+    pub up_effort_mult: f64,
+    /// 一层楼的住户有多大可能走楼梯
+    pub base_willingness: f64,
+    /// 意愿随层数的相对衰减。每层乘上 `1 - decay`
+    pub decay_per_floor: f64,
+    /// 超过这个层数几乎没人走楼梯，0 表示不设上限
+    ///
+    /// 这一条不是概率参数，是可行性约束。十八层的楼里没有人会走十八层楼梯
+    /// 去上班，哪怕电梯慢到离谱。物业也不让这么干。
+    pub practical_floor_cap: i16,
+}
+
+impl Default for Stairs {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            per_floor_s: 4.5,       // TODO(calibration)
+            per_floor_effort_s: 2.5, // TODO(calibration)
+            fixed_s: 5.0,           // TODO(calibration)
+            tau_s: 45.0,            // TODO(calibration)
+            up_effort_mult: 3.0,    // TODO(calibration)
+            base_willingness: 0.31, // TODO(calibration)
+            decay_per_floor: 0.055, // TODO(calibration) 每层的相对衰减
+            practical_floor_cap: 6,    // TODO(calibration) 六层以上基本没人走
+        }
+    }
+}
+
+impl Stairs {
+    /// 从某层走到大堂要多久，含费力惩罚。
+    pub fn cost_down(&self, floors: i16) -> f64 {
+        let n = floors.max(0) as f64;
+        n * self.per_floor_s + n * self.per_floor_effort_s + self.fixed_s
+    }
+
+    /// 从大堂爬到某层要多久。
+    pub fn cost_up(&self, floors: i16) -> f64 {
+        let n = floors.max(0) as f64;
+        n * self.per_floor_s + n * self.per_floor_effort_s * self.up_effort_mult + self.fixed_s
+    }
+
+    /// 这位住户主观上有多想走楼梯。层数越高越不想。
+    ///
+    /// 用平方衰减而不是线性。线性衰减在十八层的楼上会让八层以上全部归零，
+    /// 那太陡了：现实里八楼十楼的人只是懒得走，不是完全不会走。
+    pub fn willingness(&self, floors: i16) -> f64 {
+        let n = floors.max(0) as f64;
+        let soft = self.base_willingness * (1.0 - n * self.decay_per_floor);
+        if self.practical_floor_cap > 0 && floors > self.practical_floor_cap {
+            // 超过可行层数，只剩一点点可能性，留给电梯慢得离谱的那种情形
+            return (soft * 0.02).clamp(0.0, 1.0);
+        }
+        soft.clamp(0.0, 1.0)
+    }
+
+    /// 完整的走楼梯概率。意愿与「电梯比楼梯快不了多少」这个事实相乘。
+    pub fn probability(&self, floors: i16, elevator_estimate: f64) -> f64 {
+        let willing = self.willingness(floors);
+        if willing <= 0.0 {
+            return 0.0;
+        }
+        let stair = self.cost_down(floors);
+        let z = (elevator_estimate - stair) / self.tau_s.max(1e-6);
+        let worth_it = 1.0 / (1.0 + (-z).exp());
+        (willing * worth_it).clamp(0.0, 1.0)
+    }
+}
+
+/// 挤梯判据的配置。
+#[derive(Debug, Clone)]
+pub struct Boarding {
+    /// 载客率低于这条线人人都上，不掷骰子
+    pub soft_start_ratio: f64,
+    /// 拒绝概率曲线的陡度
+    pub gamma: f64,
+    /// 等多久算焦躁满格，秒
+    pub wait_ref_s: f64,
+    /// 焦躁补偿的上限
+    pub impatience_gain: f64,
+    /// 物理极限相对额定人数的倍数
+    pub crush_factor: f64,
+    /// 载客率达到这条就开始满载直驶
+    pub bypass_load_ratio: f64,
+}
+
+impl Default for Boarding {
+    fn default() -> Self {
+        Self {
+            soft_start_ratio: 0.75,
+            gamma: 1.0,
+            wait_ref_s: 120.0,
+            impatience_gain: 0.4,
+            crush_factor: 1.25,
+            bypass_load_ratio: 0.80,
+        }
+    }
+}
+
+impl Boarding {
+    /// 物理极限人数。
+    pub fn capacity_crush(&self, capacity_rated: usize) -> usize {
+        ((capacity_rated as f64 * self.crush_factor).ceil() as usize).max(capacity_rated)
+    }
+
+    /// 某位乘客这次愿不愿意挤上来。见 `docs/MODEL.md` 第 5.5.2 节。
+    pub fn accept_prob(&self, load_ratio: f64, tol: f64, waited_s: f64) -> f64 {
+        if load_ratio <= self.soft_start_ratio {
+            return 1.0;
+        }
+        let span = 1.0 - self.soft_start_ratio;
+        let rho = ((load_ratio - self.soft_start_ratio) / span).clamp(0.0, 1.0).powf(self.gamma);
+        let impatience = (waited_s / self.wait_ref_s).min(1.0) * self.impatience_gain;
+        (1.0 - tol * rho + impatience).clamp(0.0, 1.0)
+    }
+}
+
+/// 呼叫面板形式。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CallSurface {
+    /// 并联群控，共用一套上下按钮。一次按键一个外呼
+    GroupSingle,
+    /// 每台轿厢独立按钮，可以指定轿厢，也可以同时呼叫多台
+    PerCarPanel,
+}
+
+impl CallSurface {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            CallSurface::GroupSingle => "group_single",
+            CallSurface::PerCarPanel => "per_car_panel",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "group_single" => Some(CallSurface::GroupSingle),
+            "per_car_panel" => Some(CallSurface::PerCarPanel),
+            _ => None,
+        }
+    }
+}
+
+/// 超载死锁的配置。默认关闭。
+#[derive(Debug, Clone)]
+pub struct Overload {
+    /// 是否启用。默认关闭，因为它极其罕见
+    pub enabled: bool,
+    /// 报警线相对额定载重的倍数
+    pub trigger_ratio: f64,
+    /// 每隔多久问一次有没有人愿意退出，秒
+    pub stall_tick_s: f64,
+    /// 最后上车的人退出概率
+    pub q_last: f64,
+    /// 其他人每人的退出概率
+    pub q_other: f64,
+    /// 每累积 30 秒，退出概率乘以这个
+    pub stress_growth: f64,
+    /// 兜底超时，超时后强制最近门口的人退出
+    pub stall_timeout_s: f64,
+    /// 成人体重中位数，公斤
+    pub adult_weight_kg: f64,
+    /// 体重变异系数
+    pub weight_cv: f64,
+    /// 小孩体重中位数，公斤
+    pub child_weight_kg: f64,
+}
+
+impl Default for Overload {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            trigger_ratio: 1.05, // TODO(calibration) 对照安全规范条文
+            stall_tick_s: 10.0,
+            q_last: 0.35,           // TODO(calibration)
+            q_other: 0.05,          // TODO(calibration)
+            stress_growth: 1.6,     // TODO(calibration)
+            stall_timeout_s: 300.0,
+            adult_weight_kg: 64.0,  // TODO(calibration) 国家卫健委居民营养报告
+            weight_cv: 0.18,
+            child_weight_kg: 30.0,
+        }
+    }
+}
+
+/// 仿真控制。
+#[derive(Debug, Clone)]
+pub struct Sim {
+    /// 根种子
+    pub seed: u64,
+    /// 仿真总时长，秒
+    pub horizon_s: f64,
+    /// 跑多少天。1 表示单日
+    pub days: u32,
+    /// 演化时策略比例下限，防止某个策略彻底灭绝后再也无法复活
+    pub evolution_epsilon: f64,
+}
+
+impl Default for Sim {
+    /// 仿真窗口默认比出行窗口长 50%。多出来的那半小时是恢复期：
+    /// 高峰结束后还有人在等，仿真必须跑完把他们送下去。
+    /// 两者相等的话，最后一批人刚到电梯厅仿真就结束了，结果是「完成数」偏低，
+    /// 而那不是拥堵造成的，是仿真截断造成的
+    fn default() -> Self {
+        Self { seed: 42, horizon_s: 5400.0, days: 1, evolution_epsilon: 0.01 }
+    }
+}
+
+/// 一份完整的仿真配置。
+#[derive(Debug, Clone)]
+pub struct Config {
+    pub building: Building,
+    /// 每台轿厢一份规格
+    pub cars: Vec<CarSpec>,
+    pub traffic: Traffic,
+    pub stairs: Stairs,
+    pub boarding: Boarding,
+    pub strategy: StrategyMix,
+    pub call_surface: CallSurface,
+    pub overload: Overload,
+    pub sim: Sim,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            building: Building::default(),
+            cars: vec![CarSpec::default(); 2],
+            traffic: Traffic::default(),
+            stairs: Stairs::default(),
+            boarding: Boarding::default(),
+            strategy: StrategyMix::default(),
+            call_surface: CallSurface::GroupSingle,
+            overload: Overload::default(),
+            sim: Sim::default(),
+        }
+    }
+}
+
+/// 校验的严重程度。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Severity {
+    /// 硬约束违反，不让跑
+    Error,
+    /// 接近硬约束，跑但在网页上要显示黄条
+    Warn,
+}
+
+/// 一条校验结果。
+#[derive(Debug, Clone)]
+pub struct Issue {
+    pub severity: Severity,
+    pub code: &'static str,
+    pub message: String,
+    /// 涉及的具体楼层，给了就让网页高亮那一层
+    pub level: Option<i16>,
+}
+
+impl Issue {
+    fn error(code: &'static str, message: String) -> Self {
+        Self { severity: Severity::Error, code, message, level: None }
+    }
+
+    fn warn(code: &'static str, message: String) -> Self {
+        Self { severity: Severity::Warn, code, message, level: None }
+    }
+}
+
+/// 校验结果。
+#[derive(Debug, Clone, Default)]
+pub struct Validation {
+    pub issues: Vec<Issue>,
+}
+
+impl Validation {
+    pub fn is_ok(&self) -> bool {
+        !self.issues.iter().any(|i| i.severity == Severity::Error)
+    }
+
+    pub fn errors(&self) -> impl Iterator<Item = &Issue> {
+        self.issues.iter().filter(|i| i.severity == Severity::Error)
+    }
+
+    pub fn warnings(&self) -> impl Iterator<Item = &Issue> {
+        self.issues.iter().filter(|i| i.severity == Severity::Warn)
+    }
+}
+
+impl Config {
+    /// 校验配置。红线 5 的密度约束在这里落地。
+    pub fn validate(&self) -> Validation {
+        let mut v = Validation::default();
+        let b = &self.building;
+
+        if b.floors < 1 || b.floors > 80 {
+            v.issues.push(Issue::error(
+                "floors_range",
+                format!("住宅层数应在 1 到 80 之间，当前 {}", b.floors),
+            ));
+        }
+        if b.floor_height < 2.4 || b.floor_height > 6.0 {
+            v.issues.push(Issue::error(
+                "floor_height_range",
+                format!("层高应在 2.4 到 6.0 米之间，当前 {:.2}", b.floor_height),
+            ));
+        }
+        if b.persons_per_unit < 1.0 || b.persons_per_unit > 6.0 {
+            v.issues.push(Issue::error(
+                "persons_range",
+                format!("户均人数应在 1 到 6 之间，当前 {:.1}", b.persons_per_unit),
+            ));
+        }
+        if self.cars.is_empty() {
+            v.issues.push(Issue::error("no_cars", "至少要有一台轿厢".into()));
+        }
+        if self.cars.len() > 12 {
+            v.issues.push(Issue::warn(
+                "too_many_cars",
+                format!("{} 台轿厢超出了常规住宅的范围", self.cars.len()),
+            ));
+        }
+
+        // 户数表长度必须与层数一致
+        if b.units_per_floor.len() != b.floors as usize {
+            v.issues.push(Issue::error(
+                "units_length",
+                format!(
+                    "每层户数表的长度是 {}，住宅层数是 {}，两者必须一致",
+                    b.units_per_floor.len(),
+                    b.floors
+                ),
+            ));
+        }
+
+        // 红线 5：层数、户数、户均人数不是三个自由变量
+        if let Some(area) = b.floor_area_m2 {
+            let max_units = (area / b.min_unit_area_m2).floor() as i32;
+            let max_persons = (area / b.min_area_per_person_m2).floor() as i32;
+            for level in 1..=b.floors {
+                let idx = (level - 1) as usize;
+                let Some(&units) = b.units_per_floor.get(idx) else { continue };
+                let units = units as i32;
+                let persons = units as f32 * b.persons_per_unit;
+                if units > max_units {
+                    v.issues.push(Issue {
+                        severity: Severity::Error,
+                        code: "density_units",
+                        message: format!(
+                            "第 {} 层设了 {} 户。按最小套型 {:.0} m² 反推，这层至少要有 {:.0} m² 的套内面积才塞得下",
+                            level,
+                            units,
+                            b.min_unit_area_m2,
+                            units as f32 * b.min_unit_area_m2
+                        ),
+                        level: Some(level),
+                    });
+                }
+                // 人均面积越接近下限越可疑。落在下限的一点五倍以内就提醒。
+                let per_person = area / persons.max(1.0);
+                if persons as i32 > max_persons {
+                    v.issues.push(Issue {
+                        severity: Severity::Error,
+                        code: "density_persons",
+                        message: format!(
+                            "第 {} 层按每户 {:.1} 人算是 {:.0} 人。按人均 {:.0} m² 反推，这层至少要有 {:.0} m² 才合规",
+                            level,
+                            b.persons_per_unit,
+                            persons,
+                            b.min_area_per_person_m2,
+                            persons * b.min_area_per_person_m2
+                        ),
+                        level: Some(level),
+                    });
+                } else if per_person < b.min_area_per_person_m2 * 1.5 {
+                    v.issues.push(Issue {
+                        severity: Severity::Warn,
+                        code: "density_tight",
+                        message: format!(
+                            "第 {} 层人均 {:.1} m²，已经逼近 {:.0} m² 的下限，实际楼盘不太可能这样",
+                            level,
+                            per_person,
+                            b.min_area_per_person_m2
+                        ),
+                        level: Some(level),
+                    });
+                }
+            }
+        }
+
+        if self.traffic.departure_ratio <= 0.0 || self.traffic.departure_ratio > 1.0 {
+            v.issues.push(Issue::error(
+                "departure_ratio",
+                format!("出行率应在 0 到 1 之间，当前 {:.2}", self.traffic.departure_ratio),
+            ));
+        }
+        if self.traffic.peak_alpha <= 0.0 || self.traffic.peak_beta <= 0.0 {
+            v.issues.push(Issue::error("peak_shape", "强度曲线的两个参数都要大于 0".into()));
+        }
+        if self.sim.horizon_s <= 0.0 {
+            v.issues.push(Issue::error("horizon", "仿真时长要大于 0".into()));
+        }
+        if self.boarding.crush_factor < 1.0 {
+            v.issues.push(Issue::error(
+                "crush_factor",
+                "物理极限人数不可能小于额定人数".into(),
+            ));
+        }
+        v
+    }
+
+    /// 把配置里明显不合理的值夹到合理范围。校验通过之后调用。
+    pub fn sanitized(mut self) -> Self {
+        self.building.floor_height = self.building.floor_height.clamp(2.4, 6.0);
+        self.building.persons_per_unit = self.building.persons_per_unit.clamp(1.0, 6.0);
+        if self.building.units_per_floor.len() != self.building.floors as usize {
+            let n = self.building.floors.max(1) as usize;
+            self.building.units_per_floor.resize(n, 4);
+        }
+        for u in &mut self.building.units_per_floor {
+            *u = (*u).clamp(1, 12);
+        }
+        for c in &mut self.cars {
+            c.up = c.up.sanitized();
+            c.down = c.down.sanitized();
+            c.capacity_rated = c.capacity_rated.clamp(1, 40);
+            c.rated_load_kg = c.rated_load_kg.clamp(100.0, 5000.0);
+        }
+        self
+    }
+
+    /// 全楼住户乘出行率，估出的行程段数。
+    pub fn expected_trips(&self) -> usize {
+        (self.building.total_residents() as f64 * self.traffic.departure_ratio as f64) as usize
+    }
+}
+
+/// 网页与命令行共用的预设。
+pub fn preset(name: &str) -> Option<Config> {
+    let mut c = Config::default();
+    match name {
+        "std_residential" => {
+            c.building.floors = 18;
+            c.building.units_per_floor = vec![4; 18];
+            c.cars = vec![CarSpec::default(); 2];
+        }
+        "std_tall" => {
+            c.building.floors = 33;
+            c.building.units_per_floor = vec![6; 33];
+            c.cars = vec![CarSpec::default(); 2];
+        }
+        "std_underserved" => {
+            c.building.floors = 33;
+            c.building.units_per_floor = vec![4; 33];
+            c.cars = vec![CarSpec::default(); 1];
+        }
+        "stress_gaming" => {
+            c.building.floors = 33;
+            c.building.units_per_floor = vec![6; 33];
+            c.cars = vec![CarSpec::default(); 2];
+            c.strategy = StrategyMix { honest: 0.7, press_both: 0.25, press_up_only: 0.05, multi_call: 0.0 };
+        }
+        "stress_stalled_car" => {
+            c.building.floors = 33;
+            c.building.units_per_floor = vec![8; 33];
+            c.cars = vec![CarSpec::default(); 1];
+            c.overload.enabled = true;
+            c.boarding.crush_factor = 1.4;
+        }
+        "stress_mixed_traffic" => {
+            c.building.floors = 24;
+            c.building.units_per_floor = vec![5; 24];
+            c.cars = vec![CarSpec::default(); 3];
+            c.traffic.pattern = Pattern::NoonMixed;
+            c.traffic.reverse_ratio = 0.5;
+        }
+        _ => return None,
+    }
+    Some(c)
+}
+
+/// 全部预设的名字。
+pub fn preset_names() -> &'static [&'static str] {
+    &[
+        "std_residential",
+        "std_tall",
+        "std_underserved",
+        "stress_gaming",
+        "stress_stalled_car",
+        "stress_mixed_traffic",
+    ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_config_is_valid() {
+        let v = Config::default().validate();
+        assert!(v.is_ok(), "默认配置应当合法，实际 {:?}", v.errors().collect::<Vec<_>>());
+    }
+
+    /// 红线 5：层数、户数、户均人数不是三个自由变量。
+    #[test]
+    fn density_constraint_rejects_impossible_building() {
+        let mut c = Config::default();
+        c.building.floors = 10;
+        c.building.units_per_floor = vec![20; 10];
+        c.building.persons_per_unit = 3.0;
+        c.building.floor_area_m2 = Some(400.0);
+        let v = c.validate();
+        assert!(!v.is_ok(), "400 m² 塞 20 户 3 人的楼应当被拦下");
+        let msgs: Vec<&str> = v.errors().map(|i| i.message.as_str()).collect();
+        assert!(
+            msgs.iter().any(|m| m.contains("套内面积")),
+            "报错要给出至少需要多大面积，实际 {msgs:?}"
+        );
+    }
+
+    #[test]
+    fn density_warning_when_tight() {
+        let mut c = Config::default();
+        c.building.floors = 4;
+        c.building.units_per_floor = vec![6; 4];
+        c.building.persons_per_unit = 2.0;
+        // 6 户 2 人 = 12 人。人均 1200/12 = 100 m²，很宽松，不该告警
+        c.building.floor_area_m2 = Some(1200.0);
+        let v = c.validate();
+        assert!(v.is_ok());
+        assert_eq!(v.warnings().count(), 0);
+
+        // 换成 300 m²。6 户按最小套型要 270 m²，12 人按人均 20 要 240 m²，都过关。
+        // 但人均只有 25 m²，逼近 20 m² 的下限，应当只警告不拦
+        c.building.floor_area_m2 = Some(300.0);
+        let v = c.validate();
+        assert!(v.is_ok(), "逼近下限不该是硬错误");
+        assert!(v.warnings().count() > 0, "应当给出黄条");
+    }
+
+    #[test]
+    fn units_table_length_must_match_floors() {
+        let mut c = Config::default();
+        c.building.floors = 10;
+        c.building.units_per_floor = vec![4; 5];
+        let v = c.validate();
+        assert!(!v.is_ok());
+    }
+
+    #[test]
+    fn no_cars_is_an_error() {
+        let mut c = Config::default();
+        c.cars.clear();
+        assert!(!c.validate().is_ok());
+    }
+
+    #[test]
+    fn sanitize_fills_units_table() {
+        let mut c = Config::default();
+        c.building.floors = 12;
+        c.building.units_per_floor = vec![3; 4];
+        let c = c.sanitized();
+        assert_eq!(c.building.units_per_floor.len(), 12);
+        assert!(c.validate().is_ok());
+    }
+
+    #[test]
+    fn residents_follow_units_and_density() {
+        let mut b = Building::default();
+        b.floors = 3;
+        b.units_per_floor = vec![4, 4, 4];
+        b.persons_per_unit = 2.5;
+        assert_eq!(b.residents_at(1), 10);
+        assert_eq!(b.residents_at(0), 0, "大堂不算住宅");
+        assert_eq!(b.total_residents(), 30);
+    }
+
+    #[test]
+    fn duplex_top_floor_halves_units() {
+        let mut b = Building::default();
+        b.floors = 3;
+        b.units_per_floor = vec![4, 4, 4];
+        b.top_floor_duplex = true;
+        assert_eq!(b.units_at(3), 2);
+        assert_eq!(b.units_at(2), 4);
+    }
+
+    /// `docs/MODEL.md` 第 7.2 节给的数字。三层住户走楼梯成本 19 秒。
+    #[test]
+    fn stair_cost_matches_doc() {
+        let s = Stairs::default();
+        assert!((s.cost_down(2) - 19.0).abs() < 1e-9, "两层应为 19 秒，实际 {}", s.cost_down(2));
+        // 十层以上基本没人走，因为下行加费力已超过 70 秒
+        assert!(s.cost_down(10) > 70.0);
+        // 上行明显更难受
+        assert!(s.cost_up(10) > s.cost_down(10));
+    }
+
+    /// `docs/MODEL.md` 第 5.5 节的三条容量线。
+    #[test]
+    fn capacity_lines() {
+        let b = Boarding::default();
+        assert_eq!(b.capacity_crush(13), 17, "13 人的 1.25 倍向上取整");
+        assert!(b.capacity_crush(13) > 13);
+        // 低载客率人人都上
+        assert_eq!(b.accept_prob(0.5, 1.0, 0.0), 1.0);
+        // 满载且最有耐心的人也上不了
+        assert_eq!(b.accept_prob(1.0, 1.0, 0.0), 0.0);
+        // 满载且已经等了很久，焦躁补偿起作用
+        assert!(b.accept_prob(1.0, 1.0, 600.0) > 0.3);
+    }
+
+    /// 同样拥挤，等了三分钟的人和刚到 20 秒的人决定不同。
+    #[test]
+    fn impatience_changes_the_decision() {
+        let b = Boarding::default();
+        let fresh = b.accept_prob(0.95, 0.8, 20.0);
+        let tired = b.accept_prob(0.95, 0.8, 300.0);
+        assert!(tired > fresh, "等久了更可能挤上去，fresh={fresh} tired={tired}");
+    }
+
+    #[test]
+    fn strategy_mix_picks_by_ratio() {
+        let all_honest = StrategyMix::default();
+        for _ in 0..100 {
+            assert_eq!(all_honest.pick(0.99), Strategy::Honest);
+        }
+        let half = StrategyMix { honest: 0.5, press_both: 0.5, ..Default::default() };
+        assert_eq!(half.pick(0.1), Strategy::Honest);
+        assert_eq!(half.pick(0.9), Strategy::PressBoth);
+        // 比例未归一化也能用。honest 占 0.7，所以 u=0.5 落在诚实区间
+        let unnormalized = StrategyMix { honest: 7.0, press_both: 3.0, ..Default::default() };
+        assert_eq!(unnormalized.pick(0.5), Strategy::Honest);
+        assert_eq!(unnormalized.pick(0.9), Strategy::PressBoth);
+    }
+
+    #[test]
+    fn strategy_mix_normalizes() {
+        let m = StrategyMix { honest: 2.0, press_both: 2.0, ..Default::default() };
+        let n = m.normalized();
+        assert!((n.iter().sum::<f64>() - 1.0).abs() < 1e-12);
+        assert!((n[0] - 0.5).abs() < 1e-12);
+    }
+
+    #[test]
+    fn rated_load_gives_capacity() {
+        let c = CarSpec::from_load(1000.0);
+        assert_eq!(c.capacity_rated, 13);
+        assert_eq!(CarSpec::from_load(800.0).capacity_rated, 11);
+        assert_eq!(CarSpec::from_load(1350.0).capacity_rated, 18);
+    }
+
+    #[test]
+    fn overload_is_off_by_default() {
+        assert!(!Config::default().overload.enabled, "超载死锁默认必须关闭");
+    }
+
+    #[test]
+    fn all_presets_validate() {
+        for name in preset_names() {
+            let c = preset(name).unwrap();
+            let v = c.validate();
+            assert!(v.is_ok(), "预设 {name} 不合法：{:?}", v.errors().collect::<Vec<_>>());
+        }
+    }
+
+    #[test]
+    fn expected_trips_scales_with_population() {
+        let c = preset("std_tall").unwrap();
+        // 每层 round(6 × 2.8) = 17 人，33 层共 561 人，乘 0.55 出行率
+        assert_eq!(c.building.residents_at(1), 17);
+        assert_eq!(c.building.total_residents(), 33 * 17);
+        assert_eq!(c.expected_trips(), (561.0 * 0.55) as usize);
+    }
+}
