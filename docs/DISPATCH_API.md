@@ -139,7 +139,7 @@ pub struct SystemView<'a> {
 | 名字 | 行为 |
 | --- | --- |
 | `collective_scan` | 经典集选。保持方向，把沿途同向外呼与内选服务完，到底才反向 |
-| `selective_collective` | 集选加满载直驶。载客率过阈值后只按内选走 |
+| `selective_collective` | 集选加满载直驶。载客率过默认 80% 的阈值后只按内选走 |
 | `down_peak_sweep` | 早高峰专用。先上行到最高任务层，再一路下行扫到底。**默认算法** |
 | `nearest_car` | 派给位置上最近的一台 |
 | `round_robin` | 轮流派遣 |

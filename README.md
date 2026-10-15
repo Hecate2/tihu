@@ -69,8 +69,8 @@ cargo run --release --example repro -p tihu-core
 所以一栋「十八层住宅」的顶层号是 19。你说层数时说的是住宅层数，工具里存的是
 最高层号，差一个主入口层。
 
-主入口层默认不住人。它可以是架空层，也可以是商铺，也可以住人，看
-`ground_floor_residential` 这个开关。
+主入口层默认住人。关掉 `ground_floor_residential` 这个开关，它就变成架空层或者
+商铺。
 
 ---
 

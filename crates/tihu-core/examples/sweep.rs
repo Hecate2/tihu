@@ -124,7 +124,7 @@ fn main() {
     // ---------------- 梯数 ----------------
     section(
         "梯数从一台加到四台",
-        "十八层四户与三十三层六户，早高峰下行，出行率 55%。",
+        "十八层四户与三十三层六户，早高峰下行，出行率 66%。",
     );
     let t = Table::new(vec![
         ("楼盘", 12),
@@ -270,6 +270,40 @@ fn main() {
         }
         let s = Stats::of(&c);
         t.row(&[name.to_string(), f1(s.wait_mean), f1(s.wait_p90), pct(s.bypass), pct(s.stairs)]);
+    }
+
+    // ---------------- 晚高峰加车 ----------------
+    section(
+        "晚高峰加车有没有用",
+        "三十三层六户，全停。晚高峰上行的需求全压在主入口层，加车帮不上忙。",
+    );
+    let t = Table::new(vec![("台数", 6), ("早高峰平均等梯 s", 16), ("晚高峰平均等梯 s", 16)]);
+    t.head();
+    for cars in [2, 3, 4, 6] {
+        let morning = house(true, cars);
+        let mut evening = house(true, cars);
+        evening.traffic.pattern = Pattern::EveningUp;
+        let a = Stats::of(&morning);
+        let b = Stats::of(&evening);
+        t.row(&[cars.to_string(), f1(a.wait_mean), f1(b.wait_mean)]);
+    }
+
+    // ---------------- 每台车跑了多少趟 ----------------
+    section(
+        "每台轿厢跑了多少趟",
+        "三十三层六户六台梯，全停。看加进来的车到底在不在干活。",
+    );
+    let t = Table::new(vec![("时段", 14), ("种子", 6), ("六台车各自的趟数", 28)]);
+    t.head();
+    for (name, p) in [("早高峰下行", Pattern::MorningDown), ("晚高峰上行", Pattern::EveningUp)] {
+        for seed in [1u64, 3, 4] {
+            let mut c = house(true, 6);
+            c.traffic.pattern = p;
+            let r = quick(c, seed);
+            let trips: Vec<String> =
+                r.world.cars.iter().map(|car| car.trips.to_string()).collect();
+            t.row(&[name.to_string(), seed.to_string(), trips.join(", ")]);
+        }
     }
 
     // ---------------- 走楼梯 ----------------
