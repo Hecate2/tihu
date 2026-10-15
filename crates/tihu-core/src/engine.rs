@@ -119,9 +119,22 @@ pub struct Car {
     pub rtt_count: u64,
     /// 完成了几趟
     pub trips: u64,
-    /// 当前行程的终点层。在途中保持不变，到站才更新。
-    /// 没有它，轿厢每轮都会重新决策目标，永远走不到那一层
-    pub trip_target: i16,
+    /// 当前这条腿的目标层。腿是「从起点一次走到这里，中途只在需要时停」的一段
+    pub leg_target: i16,
+    /// 这条腿的起点层
+    pub leg_from: i16,
+    /// 这条腿的起点时刻
+    pub leg_start: f64,
+    /// 这条腿要走的距离，米
+    pub leg_dist: f64,
+    /// 这条腿上已经预定要停的楼层。由外呼指派与制动可行性共同决定
+    pub stops_planned: Vec<(i16, Dir)>,
+    /// 幽灵停站次数：开门了却没人上、也没人下
+    pub ghost_stops: u32,
+    /// 未满载就发车、而层上还有人等的停靠次数
+    pub partial_departures: u32,
+    /// 因为制动来不及而跳过的外呼层次数
+    pub overshoots: u32,
 }
 
 /// 一条登记在案的外呼。
@@ -297,8 +310,8 @@ impl World {
     }
 
     fn build_cars(&mut self) {
+        let n_levels = self.n_levels;
         for (i, spec) in self.cfg.cars.iter().enumerate() {
-            // 初始停在大堂
             self.cars.push(Car {
                 id: i,
                 level: 0.0,
@@ -316,7 +329,14 @@ impl World {
                 rtt_total: 0.0,
                 rtt_count: 0,
                 trips: 0,
-                trip_target: 0,
+                leg_target: 0,
+                leg_from: 0,
+                leg_start: 0.0,
+                leg_dist: 0.0,
+                stops_planned: Vec::with_capacity(n_levels * 2),
+                ghost_stops: 0,
+                partial_departures: 0,
+                overshoots: 0,
             });
         }
     }

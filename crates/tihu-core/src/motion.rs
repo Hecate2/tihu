@@ -120,6 +120,91 @@ pub fn traverse_time(dist: f64, p: MotionProfile) -> Traverse {
     Traverse { time: t1 + t2, peak_speed: v_p, reached_rated: false }
 }
 
+/// 从速度 `v` 减速到停所需的距离，米。
+///
+/// 与 [`traverse_time`] 里减速段的距离口径一致，所以两者可以互相验证。
+#[inline]
+pub fn decel_distance(v: f64, p: MotionProfile) -> f64 {
+    let p = p.sanitized();
+    v * v / (2.0 * p.a_dec as f64) + v * p.a_dec as f64 / (2.0 * p.j_dec as f64)
+}
+
+/// 一段行程的相位分解。位置与速度都由它推出来。
+struct LegPhases {
+    /// 走完全程的时刻
+    total_t: f64,
+    /// 峰值速度
+    v_peak: f64,
+    t_acc: f64,
+    d_acc: f64,
+    t_cruise: f64,
+    d_cruise: f64,
+    t_dec: f64,
+    d_dec: f64,
+}
+
+/// 把一段距离拆成加速段、匀速段、减速段。
+///
+/// 速度在加速段从 0 线性升到 `v_peak`，减速段再线性降到 0。这样
+/// `d_acc = v_peak·t_acc/2` 与 `docs/MODEL.md` 第 3.2 节的算式自然吻合。
+fn leg_phases(dist: f64, p: MotionProfile) -> LegPhases {
+    if dist <= 0.0 {
+        return LegPhases { total_t: 0.0, v_peak: 0.0, t_acc: 0.0, d_acc: 0.0, t_cruise: 0.0, d_cruise: 0.0, t_dec: 0.0, d_dec: 0.0 };
+    }
+    let tr = traverse_time(dist, p);
+    let v = tr.peak_speed as f64;
+    let t_acc = v / p.a_acc as f64 + p.a_acc as f64 / p.j_acc as f64;
+    let d_acc = v * v / (2.0 * p.a_acc as f64) + v * p.a_acc as f64 / (2.0 * p.j_acc as f64);
+    let t_dec = v / p.a_dec as f64 + p.a_dec as f64 / p.j_dec as f64;
+    let d_dec = decel_distance(v, p);
+    let d_cruise = (dist - d_acc - d_dec).max(0.0);
+    let t_cruise = if v > 0.0 { d_cruise / v } else { 0.0 };
+    LegPhases { total_t: tr.time, v_peak: v, t_acc, d_acc, t_cruise, d_cruise, t_dec, d_dec }
+}
+
+/// 走 `dist` 米时，时刻 `t` 已经走过的距离，以及当时的速度。
+///
+/// 逐层推进与制动判断都要用。返回 `(已走过的距离, 速度)`。
+pub fn state_at(dist: f64, p: MotionProfile, t: f64) -> (f64, f64) {
+    let l = leg_phases(dist, p);
+    if t <= 0.0 {
+        return (0.0, 0.0);
+    }
+    if t >= l.total_t {
+        return (dist, 0.0);
+    }
+    if t < l.t_acc {
+        let f = if l.t_acc > 0.0 { t / l.t_acc } else { 1.0 };
+        (l.d_acc * f * f, l.v_peak * f)
+    } else if t < l.t_acc + l.t_cruise {
+        (l.d_acc + l.v_peak * (t - l.t_acc), l.v_peak)
+    } else {
+        let f = if l.t_dec > 0.0 { (t - l.t_acc - l.t_cruise) / l.t_dec } else { 1.0 };
+        let f = f.clamp(0.0, 1.0);
+        (dist - l.d_dec * (1.0 - f) * (1.0 - f), l.v_peak * (1.0 - f))
+    }
+}
+
+/// 走 `dist` 米时，走过 `d` 米所对应的时刻。
+pub fn time_at_distance(dist: f64, p: MotionProfile, d: f64) -> f64 {
+    let l = leg_phases(dist, p);
+    if d <= 0.0 {
+        return 0.0;
+    }
+    if d >= dist {
+        return l.total_t;
+    }
+    if d <= l.d_acc {
+        let f = if l.d_acc > 0.0 { (d / l.d_acc).sqrt() } else { 1.0 };
+        l.t_acc * f
+    } else if d <= l.d_acc + l.d_cruise {
+        l.t_acc + (d - l.d_acc) / l.v_peak.max(1e-9)
+    } else {
+        let f = if l.d_dec > 0.0 { 1.0 - ((dist - d) / l.d_dec).sqrt() } else { 1.0 };
+        l.t_acc + l.t_cruise + f.clamp(0.0, 1.0) * l.t_dec
+    }
+}
+
 /// 一次停靠里「运行时间之外」的额外开销。
 ///
 /// 启停的加减速损耗不在这里算，它已经包含在 S 曲线里了。见 `docs/MODEL.md` 第 3.6 节。
