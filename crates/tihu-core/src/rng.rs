@@ -396,10 +396,128 @@ mod tests {
         }
         let mean = sum / n as f64;
         let var = sq / n as f64 - mean * mean;
-        // 均值等于中位数乘以 exp(sigma^2/2)
-        let want = 64.0 * (1.0 + 0.18f64.powi(2)).ln().sqrt().mul_add(0.0, 0.0).exp() * 1.0;
-        let _ = want;
         assert!((mean - 65.1).abs() < 0.5, "体重的均值应在 65 kg 附近，实际 {mean}");
         assert!((var.sqrt() - 11.7).abs() < 1.5, "标准差应在 12 kg 附近，实际 {}", var.sqrt());
+    }
+
+    /// 卡方检验：把 `next_u32` 切成 16 个桶，样本要均匀。
+    ///
+    /// 16 个桶、卡方统计量在自由度 15 下的 99.9% 临界值是 37.7。
+    #[test]
+    fn next_u32_passes_chi_square() {
+        let buckets = 16u32;
+        let per_bucket = 20_000u32;
+        let mut counts = vec![0u32; buckets as usize];
+        let mut g = Pcg32::new(0xBADC0FFE);
+        for _ in 0..buckets * per_bucket {
+            let v = g.next_u32();
+            counts[(v >> 28) as usize] += 1;
+        }
+        let expect = per_bucket as f64;
+        let chi: f64 = counts
+            .iter()
+            .map(|&c| {
+                let d = c as f64 - expect;
+                d * d / expect
+            })
+            .sum();
+        assert!(chi < 37.7, "卡方统计量 {chi} 偏大，低位分布可疑");
+    }
+
+    /// 取模采样 `below` 也要均匀，且不因拒绝采样偏掉。
+    #[test]
+    fn below_is_uniform_for_awkward_moduli() {
+        for n in [3u32, 7, 10, 100] {
+            let buckets = n;
+            let rounds = 20_000u32;
+            let mut counts = vec![0u32; buckets as usize];
+            let mut g = Pcg32::new(0x1234_5678 ^ n as u64);
+            for _ in 0..buckets * rounds {
+                counts[g.below(n) as usize] += 1;
+            }
+            let expect = rounds as f64;
+            let chi: f64 = counts
+                .iter()
+                .map(|&c| {
+                    let d = c as f64 - expect;
+                    d * d / expect
+                })
+                .sum();
+            // 自由度 n-1。n=100 时 99.9% 临界值约 148
+            let limit = (n as f64) * 1.5 + 12.0;
+            assert!(chi < limit, "n={n} 的卡方统计量 {chi} 偏大");
+        }
+    }
+
+    /// 相邻两次抽签不能有明显相关。相关系数应接近 0。
+    #[test]
+    fn consecutive_draws_are_uncorrelated() {
+        let mut g = Pcg32::new(0xC0FFEE);
+        let n = 200_000;
+        let mut xs = Vec::with_capacity(n);
+        let mut ys = Vec::with_capacity(n);
+        let mut prev = g.next_f64();
+        for _ in 1..n {
+            let cur = g.next_f64();
+            xs.push(prev);
+            ys.push(cur);
+            prev = cur;
+        }
+        let mean = 0.5;
+        let mut cov = 0.0;
+        let mut vx = 0.0;
+        let mut vy = 0.0;
+        for (x, y) in xs.iter().zip(ys.iter()) {
+            cov += (x - mean) * (y - mean);
+            vx += (x - mean) * (x - mean);
+            vy += (y - mean) * (y - mean);
+        }
+        let r = cov / (vx.sqrt() * vy.sqrt());
+        assert!(r.abs() < 0.01, "相邻序列相关系数 {r} 偏大");
+    }
+
+    /// 0 与 1 的位数要均衡。偏离一半太多说明发生器有结构性问题。
+    #[test]
+    fn bits_are_balanced() {
+        let mut g = Pcg32::new(0xDEADBEEF);
+        let n = 100_000u64;
+        let mut ones = 0u64;
+        for _ in 0..n {
+            ones += g.next_u32().count_ones() as u64;
+        }
+        let ratio = ones as f64 / (n * 32) as f64;
+        assert!((ratio - 0.5).abs() < 0.005, "1 的占比 {ratio} 偏离一半太多");
+    }
+
+    /// 根种子派生出的各条流不能撞在同一串数字上。
+    #[test]
+    fn derived_streams_do_not_collide() {
+        let mut seen = std::collections::HashSet::new();
+        for root in 0..200u64 {
+            for s in Stream::ALL {
+                let seed = splitmix64(root, s as u64);
+                assert!(seen.insert(seed), "root={root} stream={s:?} 的派生种子撞车了");
+            }
+        }
+    }
+
+    /// 派生种子本身也要过均匀性检查，不能因为加了个常数就退化。
+    #[test]
+    fn splitmix_output_is_well_spread() {
+        let mut counts = [0u32; 16];
+        let n = 16u32 * 4000;
+        for i in 0..n {
+            let v = splitmix64(i as u64, 3);
+            counts[(v >> 60) as usize] += 1;
+        }
+        let expect = 4000.0;
+        let chi: f64 = counts
+            .iter()
+            .map(|&c| {
+                let d = c as f64 - expect;
+                d * d / expect
+            })
+            .sum();
+        assert!(chi < 37.7, "splitmix64 高位分布可疑，卡方 {chi}");
     }
 }
