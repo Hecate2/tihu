@@ -137,7 +137,9 @@ function stopsFor(i, n, top, basement) {
 }
 
 // 按 [lo, hi] 收整数输入，超了就地钳并写回输入框，所见即所算。
-// 界限与内核 sanitized() 同一套。没超就不碰输入框，免得打断打字。
+// 界限与内核 sanitized() 同一套，其中户数上限 32 只是防呆，
+// 真正的人口密度约束在给了楼板面积时由内核另算。
+// 没超就不碰输入框，免得打断打字。输入框清空时也不写回，按老规矩走。
 // 输入框清空时也不写回，按清空前的老规矩走。
 function clampWrite(el, v, lo, hi) {
   const c = Math.min(hi, Math.max(lo, v));
@@ -151,7 +153,7 @@ function applyUi(cfg) {
   // 整数框里手输小数、负数或者清空，都先收成合法整数再往下走。
   // 不然 new Array(2.5) 直接抛 RangeError，连内核的校验错误都看不到。
   const top = Math.max(1, Math.round(num(ui.res_floors)) || 1); // 填 N 就是 1 到 N 层，主入口层是 1 层
-  const units = clampWrite(ui.units, Math.max(0, Math.round(num(ui.units)) || 0), 0, 12);
+  const units = clampWrite(ui.units, Math.max(0, Math.round(num(ui.units)) || 0), 0, 32);
   const basement = Math.max(0, Math.round(num(ui.basement)) || 0);
   const gfr = ui.gfr.checked;
 

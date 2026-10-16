@@ -1069,7 +1069,10 @@ impl Config {
             self.building.units_per_floor.resize(n, 4);
         }
         for u in &mut self.building.units_per_floor {
-            *u = (*u).clamp(0, 12);
+            // 防呆上限，不是建模约束。18 户这种大板楼合法，真正的人口密度约束
+            // 在给了楼板面积时由 validate() 按 MODEL 2.2 算。这个数只拦
+            // 手误多打一个 0 那种输入，免得网页一次造出几十万乘客卡死
+            *u = (*u).clamp(0, 32);
         }
         // 主入口层不住人时，补表或夹取之后都要把这个约定恢复回来
         if !self.building.ground_floor_residential {
@@ -1233,6 +1236,19 @@ mod tests {
         c.building.units_per_floor = vec![3; 4];
         let c = c.sanitized();
         assert_eq!(c.building.units_per_floor.len(), 12);
+        assert!(c.validate().is_ok());
+    }
+
+    /// 每层 18 户的大板楼合法，sanitized 不许打回 12。
+    #[test]
+    fn sanitize_keeps_eighteen_units_per_floor() {
+        let mut c = Config::default();
+        c.building.top_level = 10;
+        c.building.units_per_floor = vec![18; 10];
+        c.building.persons_per_unit = 4.0;
+        let c = c.sanitized();
+        assert!(c.building.units_per_floor.iter().all(|&u| u == 18));
+        assert_eq!(c.building.residents_at(2), 72);
         assert!(c.validate().is_ok());
     }
 
