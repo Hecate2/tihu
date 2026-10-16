@@ -1,3 +1,4 @@
+pub mod batch;
 pub mod builtin;
 pub mod config;
 pub mod engine;

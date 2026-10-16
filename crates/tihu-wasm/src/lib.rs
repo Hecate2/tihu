@@ -12,6 +12,7 @@
 //! 给内核带来一条与仿真无关的依赖，也会让 `file://` 下的加载多一层胶水。
 
 use serde::Serialize;
+use tihu_core::batch::{self, NumAvg, SeedBatch};
 use tihu_core::builtin::{CollectiveScan, DownPeakSweep, LoadAwareEta, SelectiveCollective};
 use tihu_core::config::{Config, Severity, LOBBY};
 use tihu_core::metrics::{Metrics, Summary};
@@ -75,6 +76,21 @@ impl Num {
             min: if s.count == 0 { 0.0 } else { r3(s.min) },
         }
     }
+
+    /// 多次运行时，每个数字取各次运行的平均。样本数也是平均到每一次。
+    fn of_avg(a: &NumAvg) -> Self {
+        Self {
+            count: a.count.round() as u64,
+            mean: r3(a.mean),
+            p50: r3(a.p50),
+            p75: r3(a.p75),
+            p90: r3(a.p90),
+            p95: r3(a.p95),
+            p99: r3(a.p99),
+            max: r3(a.max),
+            min: r3(a.min),
+        }
+    }
 }
 
 /// 某一层的汇总。`label` 由内核侧算好，网页不用自己重建层号约定。
@@ -90,6 +106,15 @@ struct FloorRow {
     declined: u32,
     no_space: u32,
     stair_users: u32,
+    /// 各次运行该层平均等待时间里最短的那次。单次运行时不出现
+    #[serde(skip_serializing_if = "Option::is_none")]
+    wait_best: Option<f64>,
+    /// 各次运行该层平均等待时间里最长的那次。单次运行时不出现
+    #[serde(skip_serializing_if = "Option::is_none")]
+    wait_worst: Option<f64>,
+    /// 有几个种子的这一层真有人出发。单次运行时不出现
+    #[serde(skip_serializing_if = "Option::is_none")]
+    live: Option<usize>,
 }
 
 /// 层号的显示写法。主入口层是 1，地下层写成 B1、B2。
@@ -149,6 +174,16 @@ struct SimReport {
     top_level: i16,
     /// 本次用的走向算法名
     router: String,
+
+    /// 一共跑过几个种子。单次运行时不出现
+    #[serde(skip_serializing_if = "Option::is_none")]
+    runs: Option<usize>,
+    /// 种子范围的起点。单次运行时不出现
+    #[serde(skip_serializing_if = "Option::is_none")]
+    seed_from: Option<u64>,
+    /// 种子范围的终点。单次运行时不出现
+    #[serde(skip_serializing_if = "Option::is_none")]
+    seed_to: Option<u64>,
 }
 
 impl SimReport {
@@ -175,6 +210,9 @@ impl SimReport {
                     declined: f.declined,
                     no_space: f.no_space,
                     stair_users: f.stair_users,
+                    wait_best: None,
+                    wait_worst: None,
+                    live: None,
                 }
             })
             .collect();
@@ -218,6 +256,85 @@ impl SimReport {
             lowest_level: b.lowest_level(),
             top_level: b.highest_level(),
             router: router.to_string(),
+
+            runs: None,
+            seed_from: None,
+            seed_to: None,
+        }
+    }
+
+    /// 一段种子跑完之后的结果。数字取各次运行的平均，逐层多带较好与较差两个值。
+    ///
+    /// 报告结构与单次运行完全相同，只是标量换成平均，逐层多三个键。网页照原样
+    /// 画图，不必区分两条路径。编号约定与单次一致，层号 0 那一格照样过滤掉。
+    fn of_batch(s: &SeedBatch, cfg: &Config, router: &str) -> Self {
+        let b = &cfg.building;
+        let basement = b.basement_levels.max(0);
+        // 层号 0 不存在，逐层明细里也不许出现这一格
+        let floors = s
+            .floors
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| *i != basement as usize)
+            .map(|(i, f)| {
+                let level = i as i16 - basement;
+                FloorRow {
+                    level,
+                    label: level_label(level),
+                    count: f.count.round() as u32,
+                    wait_mean: r3(f.wait_mean),
+                    wait_p90: r3(f.wait_p90),
+                    wait_max: r3(f.wait_max),
+                    bypass_total: f.bypass_total.round() as u32,
+                    declined: f.declined.round() as u32,
+                    no_space: f.no_space.round() as u32,
+                    stair_users: f.stair_users.round() as u32,
+                    wait_best: Some(r3(f.wait_best)),
+                    wait_worst: Some(r3(f.wait_worst)),
+                    live: Some(f.live),
+                }
+            })
+            .collect();
+        let g = &s.scalars;
+        Self {
+            wait: Num::of_avg(&s.wait),
+            ride: Num::of_avg(&s.ride),
+            door_to_door: Num::of_avg(&s.door_to_door),
+            floors,
+            wait_hist: downsample_bins(&s.wait_hist, s.wait_hist_bin_s, 5.0, 60),
+            wait_hist_bin_s: 5.0,
+
+            pax_total: g.pax_total.round() as usize,
+            pax_served: g.pax_served.round() as u64,
+            serve_ratio: r3(g.serve_ratio),
+            stair_users: g.stair_users.round() as usize,
+            stair_share: r3(g.stair_share),
+            abandoned: g.abandoned.round() as usize,
+            trips_expected: g.trips_expected.round() as usize,
+
+            n_cars: cfg.cars.len(),
+            trips: g.trips.round() as u64,
+            rtt_mean: r3(g.rtt_mean),
+            throughput_5min: r3(g.throughput_5min),
+            horizon_s: cfg.sim.horizon_s,
+
+            pax_with_bypass: g.pax_with_bypass.round() as u64,
+            pax_any_bypass: r3(g.pax_any_bypass),
+            pax_after_stall: g.pax_after_stall.round() as usize,
+            stalls: g.stalls.round() as usize,
+            stall_seconds: r3(g.stall_seconds),
+            ghost_stops: g.ghost_stops.round() as usize,
+            partial_departures: g.partial_departures.round() as usize,
+            full_bypasses: g.full_bypasses.round() as usize,
+            overshoots: g.overshoots.round() as usize,
+
+            lowest_level: b.lowest_level(),
+            top_level: b.highest_level(),
+            router: router.to_string(),
+
+            runs: Some(s.runs),
+            seed_from: Some(s.seed_from),
+            seed_to: Some(s.seed_to),
         }
     }
 }
@@ -228,6 +345,13 @@ impl SimReport {
 /// `wait.p99` 的形式出现。
 fn downsample(s: &Summary, bin_s: f64, n: usize) -> Vec<u32> {
     let (bins, w) = s.histogram();
+    downsample_bins(&bins, w, bin_s, n)
+}
+
+/// 把已经合好的一张 0.5 秒级直方图压成 `bin_s` 秒一格，只留前 `n` 格。
+///
+/// 批量运行交出来的就是各次相加后的格数，这里不再走 `Summary`。
+fn downsample_bins(bins: &[u32], w: f64, bin_s: f64, n: usize) -> Vec<u32> {
     let mut out = vec![0u32; n];
     for (i, &c) in bins.iter().enumerate() {
         let k = (i as f64 * w / bin_s) as usize;
@@ -352,6 +476,23 @@ fn dispatch(cfg: Config, router: &str) -> Run {
     }
 }
 
+/// 按名字挑一套算法，把整段种子跑完再汇总。范围取自配置里的 `seed_to`。
+///
+/// 与 `dispatch` 用同一组算法对象，区别只在循环在哪儿。聚合口径见
+/// [`tihu_core::batch`]。
+fn dispatch_batch(cfg: Config, router: &str) -> SeedBatch {
+    let b = tihu_core::builtin::DefaultBoarding::default();
+    match router {
+        "collective_scan" => {
+            batch::run_seeds(&cfg, &mut CollectiveScan, &mut LoadAwareEta::default(), &b)
+        }
+        "selective_collective" => {
+            batch::run_seeds(&cfg, &mut SelectiveCollective::default(), &mut LoadAwareEta::default(), &b)
+        }
+        _ => batch::run_seeds(&cfg, &mut DownPeakSweep, &mut LoadAwareEta::default(), &b),
+    }
+}
+
 /// 跑一次仿真。这是本 crate 的核心入口，网页与测试都走它。
 ///
 /// 配置不合法时返回 `{"ok":false,"issues":[...]}`，不让任何一条硬约束被绕过。
@@ -369,8 +510,15 @@ pub fn report_json(cfg_json: &str, router: &str) -> String {
             .unwrap_or_else(|_| r#"{"ok":false,"issues":[]}"#.to_string());
     }
     let router = if ROUTERS.contains(&router) { router } else { ROUTERS[0] };
-    let run = dispatch(cfg.sanitized(), router);
-    let sim = SimReport::of(&run, router);
+    let cfg = cfg.sanitized();
+    // 结束值大于根种子才走批量，否则照旧单跑，报告里一个批量字段都不出现
+    let sim = if cfg.sim.seed_to.is_some_and(|t| t > cfg.sim.seed) {
+        let batch = dispatch_batch(cfg.clone(), router);
+        SimReport::of_batch(&batch, &cfg, router)
+    } else {
+        let run = dispatch(cfg, router);
+        SimReport::of(&run, router)
+    };
     serde_json::to_string(&Response { ok: true, issues: vec![], sim: Some(sim) })
         .unwrap_or_else(|_| r#"{"ok":false,"issues":[]}"#.to_string())
 }
@@ -549,6 +697,92 @@ mod tests {
         let v: serde_json::Value = serde_json::from_str(&r).unwrap();
         assert_eq!(v["ok"], true);
         assert_eq!(v["sim"]["router"], "down_peak_sweep");
+    }
+
+    /// 种子范围大于根种子时走批量，报告里带 runs 与逐层的较好较差。
+    #[test]
+    fn batch_report_averages_and_carries_range() {
+        let mut c = tihu_core::config::preset("std_residential").unwrap();
+        c.sim.seed = 42;
+        c.sim.seed_to = Some(44);
+        let cfg = serde_json::to_string(&c).unwrap();
+        let r = report_json(&cfg, "down_peak_sweep");
+        let v: serde_json::Value = serde_json::from_str(&r).unwrap();
+        assert_eq!(v["ok"], true, "批量跑不起来：{r}");
+        assert_eq!(v["sim"]["runs"], 3);
+        assert_eq!(v["sim"]["seed_from"], 42);
+        assert_eq!(v["sim"]["seed_to"], 44);
+        let floors = v["sim"]["floors"].as_array().unwrap();
+        for f in floors {
+            let (b, m, w) = (
+                f["wait_best"].as_f64().unwrap(),
+                f["wait_mean"].as_f64().unwrap(),
+                f["wait_worst"].as_f64().unwrap(),
+            );
+            if f["live"].as_u64().unwrap() == 0 {
+                assert_eq!((b, m, w), (0.0, 0.0, 0.0), "没人出发的楼层三个值都该是 0");
+                continue;
+            }
+            assert!(b <= m + 1e-9 && m <= w + 1e-9, "第 {f} 层较好 ≤ 平均 ≤ 较差不成立");
+        }
+    }
+
+    /// 同一段种子跑两次，批量报告逐字节相同。
+    #[test]
+    fn batch_report_is_reproducible() {
+        let mut c = tihu_core::config::preset("std_tall").unwrap();
+        c.sim.seed = 7;
+        c.sim.seed_to = Some(11);
+        let cfg = serde_json::to_string(&c).unwrap();
+        assert_eq!(
+            report_json(&cfg, "collective_scan"),
+            report_json(&cfg, "collective_scan"),
+            "同一段种子的两次批量报告必须一模一样"
+        );
+    }
+
+    /// 种子范围超过上限要拦在校验阶段，不许硬跑。
+    #[test]
+    fn seed_range_over_limit_reports_issue() {
+        let mut c = tihu_core::config::preset("std_residential").unwrap();
+        c.sim.seed = 1;
+        c.sim.seed_to = Some(1001);
+        let r = report_json(&serde_json::to_string(&c).unwrap(), "down_peak_sweep");
+        let v: serde_json::Value = serde_json::from_str(&r).unwrap();
+        assert_eq!(v["ok"], false);
+        assert_eq!(v["issues"][0]["code"], "seed_range");
+    }
+
+    /// 单次运行的报告里不许出现批量的键，免得网页误判。
+    #[test]
+    fn single_run_omits_batch_keys() {
+        let r = report_json(&default_config_json(), "down_peak_sweep");
+        assert!(!r.contains("\"runs\""), "单次报告不该带 runs：{r}");
+        assert!(!r.contains("wait_best"), "单次报告不该带 wait_best：{r}");
+        assert!(!r.contains("seed_to"), "单次报告不该带 seed_to：{r}");
+    }
+
+    /// 批量配置要能走完整的 ABI 入口，交出来的还是长度前缀加 JSON。
+    #[test]
+    fn abi_carries_a_batch_config() {
+        let mut c = tihu_core::config::preset("std_residential").unwrap();
+        c.sim.seed = 5;
+        c.sim.seed_to = Some(9);
+        let cfg = serde_json::to_string(&c).unwrap();
+        let bytes = cfg.as_bytes();
+        // SAFETY: 手工铺一块缓冲区当调用方，模拟 JS 侧先 alloc 再写。
+        unsafe {
+            let p = tihu_alloc(bytes.len());
+            std::ptr::copy_nonoverlapping(bytes.as_ptr(), p, bytes.len());
+            let out = tihu_run(p, bytes.len(), 0);
+            tihu_free(p, bytes.len());
+            let head = std::slice::from_raw_parts(out, 4);
+            let len = u32::from_le_bytes([head[0], head[1], head[2], head[3]]) as usize;
+            let body = std::slice::from_raw_parts(out.add(4), len);
+            let v: serde_json::Value = serde_json::from_slice(body).unwrap();
+            assert_eq!(v["sim"]["runs"], 5);
+            tihu_free(out, len + 4);
+        }
     }
 
     /// 同一份配置同一个种子，两次报告必须逐字节相同。可复现是红线。

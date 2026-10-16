@@ -11,6 +11,13 @@ use crate::motion::{DoorTiming, MotionProfile};
 /// 地下层用负数，B1 是 -1，B2 是 -2。层号 0 不存在。
 pub const LOBBY: i16 = 1;
 
+/// 一次批量运行最多几个种子。
+///
+/// 实测一千个种子在十八层两梯四户约 2.3 秒，三十三层两梯六户约 6.5 秒，见
+/// `docs/PERFORMANCE.md` 第 6.1 节。这是网页主线程同步等待的上限，再多就把
+/// 界面冻住太久。超出的范围在校验阶段挡掉。
+pub const MAX_SEEDS: u64 = 1000;
+
 /// 一栋楼。
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -738,6 +745,9 @@ impl Default for Overload {
 pub struct Sim {
     /// 根种子
     pub seed: u64,
+    /// 种子范围的结束值。比根种子大时依次跑完这中间每个种子再汇总，
+    /// 缺席或者不大于根种子时只跑根种子那一个。见 `batch::run_seeds`
+    pub seed_to: Option<u64>,
     /// 仿真总时长，秒
     pub horizon_s: f64,
     /// 跑多少天。1 表示单日
@@ -752,7 +762,7 @@ impl Default for Sim {
     /// 两者相等的话，最后一批人刚到电梯厅仿真就结束了，结果是「完成数」偏低，
     /// 而那不是拥堵造成的，是仿真截断造成的
     fn default() -> Self {
-        Self { seed: 42, horizon_s: 5400.0, days: 1, evolution_epsilon: 0.01 }
+        Self { seed: 42, seed_to: None, horizon_s: 5400.0, days: 1, evolution_epsilon: 0.01 }
     }
 }
 
@@ -957,6 +967,20 @@ impl Config {
         }
         if self.sim.horizon_s <= 0.0 {
             v.issues.push(Issue::error("horizon", "仿真时长要大于 0".into()));
+        }
+        // 种子范围的宽度。结束值不大于根种子时按单次跑，不报错
+        if let Some(to) = self.sim.seed_to {
+            if to > self.sim.seed && to - self.sim.seed + 1 > MAX_SEEDS {
+                v.issues.push(Issue::error(
+                    "seed_range",
+                    format!(
+                        "种子范围最多跑 {MAX_SEEDS} 个，当前 {} 到 {} 一共 {} 个",
+                        self.sim.seed,
+                        to,
+                        to - self.sim.seed + 1
+                    ),
+                ));
+            }
         }
         if self.boarding.crush_factor < 1.0 {
             v.issues.push(Issue::error(

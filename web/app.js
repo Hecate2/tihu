@@ -180,7 +180,12 @@ function applyUi(cfg) {
   cfg.strategy.press_up_only = 0;
   cfg.strategy.multi_call = 0;
 
-  cfg.sim.seed = num(ui.seed);
+  // 随机种子与种子范围的结束值。结束值大于起始值就走批量，内核把中间每个
+  // 种子都跑一遍再汇总。填一样、填更小，或者留空，都当单次跑。
+  const seedA = Math.max(0, Math.round(num(ui.seed)));
+  const seedB = ui.seed_to.value === "" ? seedA : Math.max(0, Math.round(Number(ui.seed_to.value)));
+  cfg.sim.seed = seedA;
+  cfg.sim.seed_to = seedB > seedA ? seedB : null;
   // 仿真窗口比高峰窗口多半小时。多出来的是恢复期，不然最后一批人刚到电梯厅
   // 仿真就结束了，完成人数会偏低。
   cfg.sim.horizon_s = num(ui.window) * 60 + 1800;
@@ -303,142 +308,16 @@ function fromHash(h) {
 let runToken = 0;
 let lastRouterId = 0;
 
-// 多种子模式最多跑这么多次。一次仿真在中档楼盘要几毫秒，跑满这一段是一秒出头，
-// 再多就把页面卡住了，而结论不会再变。
-const MAX_SEEDS = 100;
-
-// 要跑的种子清单。结束值不大于起始值时就只跑起始那一个。
-function seedList() {
-  const a = Math.max(0, Math.round(num(ui.seed)));
-  const b = ui.seed_to.value === "" ? a : Math.max(0, Math.round(Number(ui.seed_to.value)));
-  if (!(b > a)) return [a];
-  if (b - a + 1 > MAX_SEEDS) return null; // 超上限，交给调用方提示
-  const out = [];
-  for (let s = a; s <= b; s++) out.push(s);
-  return out;
-}
-
-function avg(xs) {
-  if (!xs.length) return 0;
-  let t = 0;
-  for (const x of xs) t += x;
-  return t / xs.length;
-}
-
-function round(x) { return Math.round(x); }
-
-// 把多次运行的报告合成一份。规则写在 render 上方的注释里。
-function aggregate(reports, seeds) {
-  const sims = reports.map((r) => r.sim);
-  const n = sims.length;
-  const pick = (f) => sims.map(f);
-  const num = () => ({
-    count: round(avg(pick((s) => s.wait.count))),
-    mean: avg(pick((s) => s.wait.mean)),
-    p50: avg(pick((s) => s.wait.p50)),
-    p75: avg(pick((s) => s.wait.p75)),
-    p90: avg(pick((s) => s.wait.p90)),
-    p95: avg(pick((s) => s.wait.p95)),
-    p99: avg(pick((s) => s.wait.p99)),
-    max: avg(pick((s) => s.wait.max)),
-    min: avg(pick((s) => s.wait.min)),
-  });
-
-  // 逐层：平均取各次该层平均的平均，较好与较差取其中的最小与最大。
-  // 某一层在某个种子里一个乘客都没有时，那一次不参与平均，否则零样本会把均值拉下去。
-  const floors = [];
-  sims[0].floors.forEach((f0, i) => {
-    const rows = pick((s) => s.floors[i]);
-    const live = rows.filter((r) => r.count > 0);
-    if (!live.length) return;
-    const means = live.map((r) => r.wait_mean);
-    floors.push({
-      level: f0.level,
-      label: f0.label,
-      count: round(avg(rows.map((r) => r.count))),
-      wait_mean: avg(means),
-      wait_best: Math.min(...means),
-      wait_worst: Math.max(...means),
-      live: live.length,
-      wait_p90: avg(live.map((r) => r.wait_p90)),
-      wait_max: avg(live.map((r) => r.wait_max)),
-      bypass_total: round(avg(rows.map((r) => r.bypass_total))),
-      declined: round(avg(rows.map((r) => r.declined))),
-      no_space: round(avg(rows.map((r) => r.no_space))),
-      stair_users: round(avg(rows.map((r) => r.stair_users))),
-    });
-  });
-
-  // 分布图把各次的格数直接相加，柱高是这 N 次里落在该格的人次合计。
-  const wait_hist = sims[0].wait_hist.map((_, i) =>
-    sims.reduce((acc, s) => acc + (s.wait_hist[i] || 0), 0)
-  );
-
-  return {
-    runs: n,
-    seed_from: seeds[0],
-    seed_to: seeds[n - 1],
-    wait: num(),
-    ride: {
-      count: round(avg(pick((s) => s.ride.count))),
-      mean: avg(pick((s) => s.ride.mean)),
-      p90: avg(pick((s) => s.ride.p90)),
-    },
-    door_to_door: {
-      count: round(avg(pick((s) => s.door_to_door.count))),
-      mean: avg(pick((s) => s.door_to_door.mean)),
-      p90: avg(pick((s) => s.door_to_door.p90)),
-    },
-    floors,
-    wait_hist,
-    wait_hist_bin_s: sims[0].wait_hist_bin_s,
-
-    pax_total: round(avg(pick((s) => s.pax_total))),
-    pax_served: round(avg(pick((s) => s.pax_served))),
-    serve_ratio: avg(pick((s) => s.serve_ratio)),
-    stair_users: round(avg(pick((s) => s.stair_users))),
-    stair_share: avg(pick((s) => s.stair_share)),
-    abandoned: round(avg(pick((s) => s.abandoned))),
-    trips_expected: round(avg(pick((s) => s.trips_expected))),
-
-    n_cars: sims[0].n_cars,
-    trips: round(avg(pick((s) => s.trips))),
-    rtt_mean: avg(pick((s) => s.rtt_mean)),
-    throughput_5min: avg(pick((s) => s.throughput_5min)),
-    horizon_s: sims[0].horizon_s,
-
-    pax_with_bypass: round(avg(pick((s) => s.pax_with_bypass))),
-    pax_any_bypass: avg(pick((s) => s.pax_any_bypass)),
-    pax_after_stall: round(avg(pick((s) => s.pax_after_stall))),
-    stalls: Math.round(avg(pick((s) => s.stalls))),
-    stall_seconds: avg(pick((s) => s.stall_seconds)),
-    ghost_stops: Math.round(avg(pick((s) => s.ghost_stops))),
-    partial_departures: Math.round(avg(pick((s) => s.partial_departures))),
-    full_bypasses: Math.round(avg(pick((s) => s.full_bypasses))),
-    overshoots: Math.round(avg(pick((s) => s.overshoots))),
-
-    lowest_level: sims[0].lowest_level,
-    top_level: sims[0].top_level,
-    router: sims[0].router,
-  };
-}
-
 async function run() {
   const token = ++runToken;
   const cfg = applyUi(clone(base));
   lastRouterId = Number(ui.router.value);
 
-  const seeds = seedList();
-  if (seeds === null) {
-    setNote("");
-    const a = Math.round(num(ui.seed));
-    showIssues([{ severity: "warn", message:
-      "种子范围超过 " + MAX_SEEDS + " 个，请把结束值收到 " + (a + MAX_SEEDS - 1) + " 以内。" }]);
-    return;
-  }
-
-  if (seeds.length > 1) {
-    setNote("正在跑 " + seeds.length + " 个种子…");
+  // 批量与单次都只调一次内核，聚合在内核侧完成。这里只按种子范围估个次数，
+  // 用来先画一句提示，真正跑几个种子由内核说了算。
+  const runs = cfg.sim.seed_to ? cfg.sim.seed_to - cfg.sim.seed + 1 : 1;
+  setNote(runs > 1 ? "正在跑 " + runs + " 个种子…" : "");
+  if (runs > 1) {
     // 先把这句话画到页面上，再开始算，不然页面会一直停在上一张图。
     await new Promise((r) => setTimeout(r, 0));
     if (token !== runToken) return;
@@ -446,26 +325,10 @@ async function run() {
 
   let sim;
   try {
-    if (seeds.length === 1) {
-      setNote("");
-      cfg.sim.seed = seeds[0];
-      const res = kernel.run(cfg, lastRouterId);
-      if (!res.ok) { showIssues(res.issues); return; }
-      showIssues(res.issues);
-      sim = res.sim;
-    } else {
-      const reports = [];
-      for (const seed of seeds) {
-        cfg.sim.seed = seed;
-        const res = kernel.run(cfg, lastRouterId);
-        if (!res.ok) { setNote(""); showIssues(res.issues); return; }
-        if (token !== runToken) return; // 中途又被拖了一次，这一趟作废
-        reports.push(res);
-      }
-      const issues = reports[0].issues;
-      showIssues(issues);
-      sim = aggregate(reports, seeds);
-    }
+    const res = kernel.run(cfg, lastRouterId);
+    if (!res.ok) { setNote(""); showIssues(res.issues); return; }
+    showIssues(res.issues);
+    sim = res.sim;
   } catch (e) {
     setNote("");
     showIssues([{ severity: "error", message: "仿真没能跑起来：" + e.message }]);
@@ -501,8 +364,8 @@ function showIssues(issues) {
 
 function fmt(x, d) { return (x == null || !isFinite(x) ? "—" : x.toFixed(d == null ? 1 : d)); }
 
-// 单次运行时下面每个数字就是那一次的结果。多种子运行会先经 aggregate 合成一份，
-// 那时秒数与比例取各次的平均，样本数也是平均到每一次，只有分布图是各次相加。
+// 单次运行时下面每个数字就是那一次的结果。多种子运行时内核已经合成过一份，
+// 秒数与比例是各次的平均，样本数也是每次的平均，只有分布图是各次相加。
 function render(s) {
   const runs = s.runs || 1;
   document.getElementById("v_wait").innerHTML = fmt(s.wait.mean) + "<small>秒</small>";
