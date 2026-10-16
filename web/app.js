@@ -136,13 +136,22 @@ function stopsFor(i, n, top, basement) {
   return "all";
 }
 
+// 按 [lo, hi] 收整数输入，超了就地钳并写回输入框，所见即所算。
+// 界限与内核 sanitized() 同一套。没超就不碰输入框，免得打断打字。
+// 输入框清空时也不写回，按清空前的老规矩走。
+function clampWrite(el, v, lo, hi) {
+  const c = Math.min(hi, Math.max(lo, v));
+  if (el.value !== "" && Number(el.value) !== c) el.value = String(c);
+  return c;
+}
+
 // 把界面上的值写进配置对象。只碰用户能调的那些字段，预设带进来的其他内容
 // （比如层间客流的每股占比）一律原样留着。
 function applyUi(cfg) {
   // 整数框里手输小数、负数或者清空，都先收成合法整数再往下走。
   // 不然 new Array(2.5) 直接抛 RangeError，连内核的校验错误都看不到。
   const top = Math.max(1, Math.round(num(ui.res_floors)) || 1); // 填 N 就是 1 到 N 层，主入口层是 1 层
-  const units = Math.max(0, Math.round(num(ui.units)) || 0);
+  const units = clampWrite(ui.units, Math.max(0, Math.round(num(ui.units)) || 0), 0, 12);
   const basement = Math.max(0, Math.round(num(ui.basement)) || 0);
   const gfr = ui.gfr.checked;
 
@@ -157,14 +166,15 @@ function applyUi(cfg) {
   cfg.building.units_per_floor = floors;
 
   const n = Math.max(1, Math.round(num(ui.ncars)) || 1);
-  const load = num(ui.load);
+  const load = clampWrite(ui.load, num(ui.load) || 0, 100, 5000);
   // 速度可以填任意小数。清了输入框或者填了怪值就退回 1.75，不让内核拿到 0。
+  // 上限 20 与内核同界，超了写回输入框。
   const raw = Number(ui.speed.value);
-  const v = isFinite(raw) && raw > 0 ? raw : 1.75;
+  const v = clampWrite(ui.speed, isFinite(raw) && raw > 0 ? raw : 1.75, 0.1, 20);
   const [a, j] = profileFor(v);
   const car = {
     rated_load_kg: load,
-    capacity_rated: Math.max(1, Math.round(load / 75)),
+    capacity_rated: Math.min(40, Math.max(1, Math.round(load / 75))),
     up: { v_max: v, a_acc: a, a_dec: a, j_acc: j, j_dec: j },
     down: { v_max: v, a_acc: a, a_dec: a, j_acc: j, j_dec: j },
     initial_level: 1,
