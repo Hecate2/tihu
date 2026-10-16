@@ -59,6 +59,51 @@ function barChartH(rows, opts) {
 }
 
 /**
+ * 带区间的水平条形图，用来画多次运行后的「每层等多久」。
+ * rows: [{ label, mean, best, worst, live }]。best 与 worst 是各次运行里
+ * 该层平均的最短与最长，live 是有乘客从该层出发的次数。
+ */
+function barChartRange(rows, opts) {
+  const o = Object.assign({ rowH: 19, barW: 240, labelW: 46, digits: 1, max: null }, opts);
+  const max = o.max || Math.max(1e-6, ...rows.map((r) => r.worst || 0));
+  const w = o.labelW + o.barW + 52;
+  const h = rows.length * o.rowH + 22;
+  const x = (v) => o.labelW + Math.max(0, Math.min(1, v / max)) * o.barW;
+  let s = `<svg width="${w}" height="${h}" viewBox="0 0 ${w} ${h}" role="img">`;
+
+  for (const f of [0.25, 0.5, 0.75, 1]) {
+    const gx = o.labelW + f * o.barW;
+    s += `<line x1="${gx}" y1="16" x2="${gx}" y2="${h - 6}" stroke="#2a323e" stroke-width="1" stroke-dasharray="${f === 1 ? "0" : "3 3"}"/>`;
+  }
+  s += `<text x="0" y="10" fill="#97a3b4" font-size="10">平均等待，秒</text>`;
+  s += `<text x="${o.labelW + o.barW}" y="10" fill="#97a3b4" font-size="10" text-anchor="end">${max.toFixed(0)}</text>`;
+
+  rows.forEach((r, i) => {
+    const y = 18 + i * o.rowH;
+    const mean = r.mean || 0;
+    const best = Math.max(0, Math.min(r.best == null ? mean : r.best, mean));
+    const worst = Math.max(mean, r.worst == null ? mean : r.worst);
+    const color = heat(max > 0 ? mean / max : 0);
+    const tip =
+      r.label + "：平均 " + mean.toFixed(o.digits) + " 秒，" + (r.live || 0) + " 次运行有人从这里出发，" +
+      "最短 " + best.toFixed(o.digits) + " 秒，最长 " + worst.toFixed(o.digits) + " 秒";
+    s += `<g><title>${esc(tip)}</title>`;
+    s += `<text x="${o.labelW - 6}" y="${y + 12}" fill="#97a3b4" font-size="11" text-anchor="end">${esc(r.label)}</text>`;
+    s += `<rect x="${o.labelW}" y="${y + 2}" width="${o.barW}" height="${o.rowH - 7}" fill="#1e242e" rx="2"/>`;
+    // 浅色带：各次运行里最短与最长的那两次
+    const band = x(worst) - x(best);
+    if (band > 0.5) {
+      s += `<rect x="${x(best).toFixed(1)}" y="${y + 2}" width="${band.toFixed(1)}" height="${o.rowH - 7}" fill="${color}" opacity="0.22" rx="2"/>`;
+    }
+    // 实心短线：各次的平均
+    s += `<line x1="${x(mean).toFixed(1)}" y1="${y + 2}" x2="${x(mean).toFixed(1)}" y2="${y + o.rowH - 5}" stroke="${color}" stroke-width="3"/>`;
+    s += `<text x="${o.labelW + o.barW + 6}" y="${y + 12}" fill="#e6ebf2" font-size="11" font-variant-numeric="tabular-nums">${mean.toFixed(o.digits)}</text>`;
+    s += `</g>`;
+  });
+  return s + "</svg>";
+}
+
+/**
  * 竖向柱状图，用来画等待时间的分布。
  * bins: 每格的样本数；binS: 格宽（秒）。
  */

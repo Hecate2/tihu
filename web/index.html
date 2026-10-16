@@ -143,6 +143,10 @@
         <label for="seed">随机种子<span class="hint">同种子结果完全一致</span></label>
         <input type="number" id="seed" min="0" max="999999" step="1" value="42">
       </div>
+      <div class="row">
+        <label for="seed_to">种子跑到<span class="hint">填得比随机种子大，中间每个种子都跑一遍再汇总</span></label>
+        <input type="number" id="seed_to" min="0" max="999999" step="1" value="42">
+      </div>
     </fieldset>
 
     <div class="actions">
@@ -153,6 +157,8 @@
 
   <section>
     <ul class="issues" id="issues" hidden></ul>
+
+    <p class="hint note" id="runs_note" hidden></p>
 
     <div class="cards">
       <div class="card">
@@ -180,11 +186,13 @@
     <div class="grid2">
       <div class="panel">
         <h2>每层等多久</h2>
+        <p class="hint note" id="floor_note" hidden></p>
         <div class="chart-wrap" id="chart_floor"><p class="dim">还没有结果。</p></div>
       </div>
       <div>
         <div class="panel" style="margin-bottom:16px">
           <h2>等待时间的分布</h2>
+          <p class="hint note" id="hist_note" hidden></p>
           <div class="chart-wrap" id="chart_hist"><p class="dim">还没有结果。</p></div>
         </div>
         <div class="panel">
