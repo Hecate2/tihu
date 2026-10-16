@@ -25,81 +25,131 @@ function heat(t) {
 }
 
 /**
- * 水平条形图共用的画框：尺寸、参考线与标题。
- * barChartH 与 barChartRange 只差每一行的画法，框是同一套。
+ * 双指标图的共用件：竖向参考线。
+ * `top` 是第一行数据顶上的 Y，图例占掉标题下面那一行。
  */
-function hFrame(o, nRows, max) {
-  const w = o.labelW + o.barW + 52;
-  const h = nRows * o.rowH + 22;
-  let s = `<svg width="${w}" height="${h}" viewBox="0 0 ${w} ${h}" role="img">`;
-
-  // 四条竖向参考线，让不同图之间能对比
+function pairGrid(o, h, top) {
+  let s = "";
   for (const f of [0.25, 0.5, 0.75, 1]) {
     const gx = o.labelW + f * o.barW;
-    s += `<line x1="${gx}" y1="16" x2="${gx}" y2="${h - 6}" stroke="#2a323e" stroke-width="1" stroke-dasharray="${f === 1 ? "0" : "3 3"}"/>`;
+    s += `<line x1="${gx}" y1="${top}" x2="${gx}" y2="${h - 6}" stroke="#2a323e" stroke-width="1" stroke-dasharray="${f === 1 ? "0" : "3 3"}"/>`;
   }
-  s += `<text x="0" y="10" fill="#97a3b4" font-size="10">平均等待，秒</text>`;
-  s += `<text x="${o.labelW + o.barW}" y="10" fill="#97a3b4" font-size="10" text-anchor="end">${max.toFixed(0)}</text>`;
-  return { h, head: s };
+  return s;
 }
 
 /**
- * 水平条形图，用来画「每一层等多久」。
- * rows: [{ label, value }]，value 为 null 时画成空。
+ * 双指标图的图例，画在标题下面那一行。
+ * 等梯走绿黄红，门到门走蓝色。细竖线是 P50，粗竖线是 P90。
  */
-function barChartH(rows, opts) {
-  const o = Object.assign({ rowH: 19, barW: 240, labelW: 46, unit: "s", digits: 1, max: null }, opts);
-  const max = o.max || Math.max(1e-6, ...rows.map((r) => r.value || 0));
-  const { h, head } = hFrame(o, rows.length, max);
-  let s = head;
+function pairLegend(o, y) {
+  let s = `<rect x="${o.labelW}" y="${y}" width="10" height="8" fill="${heat(0.15)}" rx="2"/>`;
+  s += `<text x="${o.labelW + 14}" y="${y + 8}" fill="#97a3b4" font-size="10">等梯均值</text>`;
+  s += `<rect x="${o.labelW + 82}" y="${y}" width="10" height="8" fill="#4aa3ff" opacity="0.85" rx="2"/>`;
+  s += `<text x="${o.labelW + 96}" y="${y + 8}" fill="#97a3b4" font-size="10">门到门均值</text>`;
+  s += `<line x1="${o.labelW + 178}" y1="${y}" x2="${o.labelW + 178}" y2="${y + 8}" stroke="#fff" stroke-width="1" opacity="0.55"/>`;
+  s += `<line x1="${o.labelW + 184}" y1="${y}" x2="${o.labelW + 184}" y2="${y + 8}" stroke="#fff" stroke-width="2.5"/>`;
+  s += `<text x="${o.labelW + 190}" y="${y + 8}" fill="#97a3b4" font-size="10">细线 P50，粗线 P90</text>`;
+  return s;
+}
 
+/**
+ * 双条形图，用来画「每一层等多久，门到门多久」。
+ * rows: [{ label, wait, waitP50, waitP90, d2d, d2dP50, d2dP90 }]。
+ * 每层两根条：上为等梯均值，下为门到门均值。条上的细竖线是 P50，
+ * 粗竖线是 P90。两根条共用一把刻度，颜色各自按本指标的最大值归一，
+ * 免得等梯那根被门到门压得全绿。
+ */
+function barChartPair(rows, opts) {
+  const o = Object.assign({ rowH: 30, barW: 240, labelW: 46, digits: 1, max: null }, opts);
+  const max = o.max || Math.max(1e-6, ...rows.map((r) => Math.max(r.d2dP90 || 0, r.waitP90 || 0)));
+  const maxWait = Math.max(1e-6, ...rows.map((r) => r.wait || 0));
+  const top = 36;
+  const w = o.labelW + o.barW + 104;
+  const h = top + rows.length * o.rowH + 6;
+  const x = (v) => o.labelW + Math.max(0, Math.min(1, v / max)) * o.barW;
+  let s = `<svg width="${w}" height="${h}" viewBox="0 0 ${w} ${h}" role="img">`;
+  s += pairGrid(o, h, top);
+  s += `<text x="0" y="10" fill="#97a3b4" font-size="10">等梯与门到门，秒</text>`;
+  s += `<text x="${o.labelW + o.barW}" y="10" fill="#97a3b4" font-size="10" text-anchor="end">${max.toFixed(0)}</text>`;
+  s += pairLegend(o, 18);
+
+  // 一行两根条：等梯在上，门到门在下。分位竖线只画在各自那根条的高度里。
+  const tick = (v, y1, y2, wide) =>
+    `<line x1="${x(v).toFixed(1)}" y1="${y1}" x2="${x(v).toFixed(1)}" y2="${y2}" stroke="#fff" stroke-width="${wide ? "2.5" : "1"}" opacity="${wide ? "1" : "0.55"}"/>`;
   rows.forEach((r, i) => {
-    const y = 18 + i * o.rowH;
-    const v = r.value || 0;
-    const bw = Math.max(v > 0 ? 1.5 : 0, (v / max) * o.barW);
-    const hot = v / max;
-    s += `<text x="${o.labelW - 6}" y="${y + 12}" fill="#97a3b4" font-size="11" text-anchor="end">${esc(r.label)}</text>`;
-    s += `<rect x="${o.labelW}" y="${y + 2}" width="${o.barW}" height="${o.rowH - 7}" fill="#1e242e" rx="2"/>`;
-    if (bw > 0) {
-      s += `<rect x="${o.labelW}" y="${y + 2}" width="${bw.toFixed(1)}" height="${o.rowH - 7}" fill="${heat(hot)}" rx="2"/>`;
+    const y = top + i * o.rowH;
+    const wv = r.wait || 0, dv = r.d2d || 0;
+    const wb = Math.max(wv > 0 ? 1.5 : 0, (wv / max) * o.barW);
+    const db = Math.max(dv > 0 ? 1.5 : 0, (dv / max) * o.barW);
+    const tip =
+      r.label + "：等梯均值 " + wv.toFixed(o.digits) + " 秒，P50 " + (r.waitP50 || 0).toFixed(o.digits) +
+      "，P90 " + (r.waitP90 || 0).toFixed(o.digits) + "；门到门均值 " + dv.toFixed(o.digits) +
+      " 秒，P50 " + (r.d2dP50 || 0).toFixed(o.digits) + "，P90 " + (r.d2dP90 || 0).toFixed(o.digits);
+    s += `<g><title>${esc(tip)}</title>`;
+    s += `<text x="${o.labelW - 6}" y="${y + 19}" fill="#97a3b4" font-size="11" text-anchor="end">${esc(r.label)}</text>`;
+    s += `<rect x="${o.labelW}" y="${y + 2}" width="${o.barW}" height="${o.rowH - 6}" fill="#1e242e" rx="2"/>`;
+    if (wb > 0) {
+      s += `<rect x="${o.labelW}" y="${y + 4}" width="${wb.toFixed(1)}" height="8" fill="${heat(wv / maxWait)}" rx="2"/>`;
     }
-    s += `<text x="${o.labelW + o.barW + 6}" y="${y + 12}" fill="#e6ebf2" font-size="11" font-variant-numeric="tabular-nums">${v.toFixed(o.digits)}</text>`;
+    s += tick(r.waitP50 || 0, y + 4, y + 12, false);
+    s += tick(r.waitP90 || 0, y + 4, y + 12, true);
+    if (db > 0) {
+      s += `<rect x="${o.labelW}" y="${y + 16}" width="${db.toFixed(1)}" height="8" fill="#4aa3ff" opacity="0.85" rx="2"/>`;
+    }
+    s += tick(r.d2dP50 || 0, y + 16, y + 24, false);
+    s += tick(r.d2dP90 || 0, y + 16, y + 24, true);
+    s += `<text x="${o.labelW + o.barW + 6}" y="${y + 19}" fill="#e6ebf2" font-size="11" font-variant-numeric="tabular-nums">${wv.toFixed(o.digits)} / ${dv.toFixed(o.digits)}</text>`;
+    s += `</g>`;
   });
   return s + "</svg>";
 }
 
 /**
- * 带区间的水平条形图，用来画多次运行后的「每层等多久」。
- * rows: [{ label, mean, best, worst, live }]。best 与 worst 是各次运行里
- * 该层平均的最短与最长，live 是有乘客从该层出发的次数。
+ * 带区间的双条形图，用来画多次运行后的「每层等多久，门到门多久」。
+ * rows: [{ label, waitMean, waitBest, waitWorst, d2dMean, d2dBest, d2dWorst, live }]。
+ * best 与 worst 是各次运行里该层均值的最短与最长，live 是有乘客从该层出发的次数。
+ * 每层两组：上为等梯，下为门到门。浅色带是最短与最长的两次，实线是各次的平均。
  */
-function barChartRange(rows, opts) {
-  const o = Object.assign({ rowH: 19, barW: 240, labelW: 46, digits: 1, max: null }, opts);
-  const max = o.max || Math.max(1e-6, ...rows.map((r) => r.worst || 0));
-  const { head } = hFrame(o, rows.length, max);
+function barChartRangePair(rows, opts) {
+  const o = Object.assign({ rowH: 32, barW: 240, labelW: 46, digits: 1, max: null }, opts);
+  const max = o.max || Math.max(1e-6, ...rows.map((r) => r.d2dWorst || 0));
+  const maxWait = Math.max(1e-6, ...rows.map((r) => r.waitWorst || 0));
+  const top = 36;
+  const w = o.labelW + o.barW + 104;
+  const h = top + rows.length * o.rowH + 6;
   const x = (v) => o.labelW + Math.max(0, Math.min(1, v / max)) * o.barW;
-  let s = head;
+  let s = `<svg width="${w}" height="${h}" viewBox="0 0 ${w} ${h}" role="img">`;
+  s += pairGrid(o, h, top);
+  s += `<text x="0" y="10" fill="#97a3b4" font-size="10">等梯与门到门，秒</text>`;
+  s += `<text x="${o.labelW + o.barW}" y="10" fill="#97a3b4" font-size="10" text-anchor="end">${max.toFixed(0)}</text>`;
+  s += pairLegend(o, 18);
 
-  rows.forEach((r, i) => {
-    const y = 18 + i * o.rowH;
-    const mean = r.mean || 0;
-    const best = Math.max(0, Math.min(r.best == null ? mean : r.best, mean));
-    const worst = Math.max(mean, r.worst == null ? mean : r.worst);
-    const color = heat(max > 0 ? mean / max : 0);
-    const tip =
-      r.label + "：平均 " + mean.toFixed(o.digits) + " 秒，" + (r.live || 0) + " 次运行有人从这里出发，" +
-      "最短 " + best.toFixed(o.digits) + " 秒，最长 " + worst.toFixed(o.digits) + " 秒";
-    s += `<g><title>${esc(tip)}</title>`;
-    s += `<text x="${o.labelW - 6}" y="${y + 12}" fill="#97a3b4" font-size="11" text-anchor="end">${esc(r.label)}</text>`;
-    s += `<rect x="${o.labelW}" y="${y + 2}" width="${o.barW}" height="${o.rowH - 7}" fill="#1e242e" rx="2"/>`;
-    // 浅色带：各次运行里最短与最长的那两次
-    const band = x(worst) - x(best);
+  const lane = (mean, best, worst, y1, color, bandColor) => {
+    const m = mean || 0;
+    const b = Math.max(0, Math.min(best == null ? m : best, m));
+    const t = Math.max(m, worst == null ? m : worst);
+    let g = "";
+    const band = x(t) - x(b);
     if (band > 0.5) {
-      s += `<rect x="${x(best).toFixed(1)}" y="${y + 2}" width="${band.toFixed(1)}" height="${o.rowH - 7}" fill="${color}" opacity="0.22" rx="2"/>`;
+      g += `<rect x="${x(b).toFixed(1)}" y="${y1}" width="${band.toFixed(1)}" height="9" fill="${bandColor}" opacity="0.22" rx="2"/>`;
     }
-    // 实心短线：各次的平均
-    s += `<line x1="${x(mean).toFixed(1)}" y1="${y + 2}" x2="${x(mean).toFixed(1)}" y2="${y + o.rowH - 5}" stroke="${color}" stroke-width="3"/>`;
-    s += `<text x="${o.labelW + o.barW + 6}" y="${y + 12}" fill="#e6ebf2" font-size="11" font-variant-numeric="tabular-nums">${mean.toFixed(o.digits)}</text>`;
+    g += `<line x1="${x(m).toFixed(1)}" y1="${y1}" x2="${x(m).toFixed(1)}" y2="${y1 + 9}" stroke="${color}" stroke-width="3"/>`;
+    return { g, b: b, t: t, m: m };
+  };
+  rows.forEach((r, i) => {
+    const y = top + i * o.rowH;
+    const waitColor = heat(maxWait > 0 ? (r.waitMean || 0) / maxWait : 0);
+    const wm = lane(r.waitMean, r.waitBest, r.waitWorst, y + 3, waitColor, waitColor);
+    const dm = lane(r.d2dMean, r.d2dBest, r.d2dWorst, y + 16, "#4aa3ff", "#4aa3ff");
+    const tip =
+      r.label + "：等梯平均 " + wm.m.toFixed(o.digits) + " 秒，最短 " + wm.b.toFixed(o.digits) +
+      "，最长 " + wm.t.toFixed(o.digits) + "；门到门平均 " + dm.m.toFixed(o.digits) + " 秒，最短 " +
+      dm.b.toFixed(o.digits) + "，最长 " + dm.t.toFixed(o.digits) + "，" + (r.live || 0) + " 次运行有人从这里出发";
+    s += `<g><title>${esc(tip)}</title>`;
+    s += `<text x="${o.labelW - 6}" y="${y + 20}" fill="#97a3b4" font-size="11" text-anchor="end">${esc(r.label)}</text>`;
+    s += `<rect x="${o.labelW}" y="${y + 2}" width="${o.barW}" height="${o.rowH - 6}" fill="#1e242e" rx="2"/>`;
+    s += wm.g + dm.g;
+    s += `<text x="${o.labelW + o.barW + 6}" y="${y + 20}" fill="#e6ebf2" font-size="11" font-variant-numeric="tabular-nums">${wm.m.toFixed(o.digits)} / ${dm.m.toFixed(o.digits)}</text>`;
     s += `</g>`;
   });
   return s + "</svg>";

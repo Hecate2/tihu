@@ -413,20 +413,30 @@ function render(s) {
   if (!floors.length) {
     box.innerHTML = '<p class="dim">这一趟没有任何人在住宅层出发。</p>';
   } else if (runs > 1) {
-    box.innerHTML = barChartRange(
+    box.innerHTML = barChartRangePair(
       floors.map((f) => ({
-        label: f.label, mean: f.wait_mean, best: f.wait_best, worst: f.wait_worst, live: f.live,
+        label: f.label,
+        waitMean: f.wait_mean, waitBest: f.wait_best, waitWorst: f.wait_worst,
+        d2dMean: f.d2d_mean, d2dBest: f.d2d_best, d2dWorst: f.d2d_worst,
+        live: f.live,
       })),
       { digits: 1 }
     );
   } else {
-    box.innerHTML = barChartH(floors.map((f) => ({ label: f.label, value: f.wait_mean })), { digits: 1 });
+    box.innerHTML = barChartPair(
+      floors.map((f) => ({
+        label: f.label,
+        wait: f.wait_mean, waitP50: f.wait_p50, waitP90: f.wait_p90,
+        d2d: f.d2d_mean, d2dP50: f.d2d_p50, d2dP90: f.d2d_p90,
+      })),
+      { digits: 1 }
+    );
   }
 
   const floorNote = document.getElementById("floor_note");
   floorNote.hidden = runs <= 1;
   floorNote.textContent = runs > 1
-    ? "共跑 " + runs + " 次。实心短线是各次的平均，浅色带是 " + runs + " 次里最短与最长的那两次。"
+    ? "共跑 " + runs + " 次。每层两组：上为等梯，下为门到门。实线是各次的平均，浅色带是最短与最长的那两次。"
     : "";
 
   const histNote = document.getElementById("hist_note");
