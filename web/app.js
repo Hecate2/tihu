@@ -99,7 +99,7 @@ for (const id of [
   "ncars", "load", "speed", "stops",
   "pattern", "dep", "window", "ret",
   "stairs", "pressb", "overload",
-  "router", "seed", "seed_to",
+  "router", "seed", "seed_count",
 ]) {
   ui[id] = document.getElementById(id);
 }
@@ -196,12 +196,12 @@ function applyUi(cfg) {
   cfg.strategy.press_both = pbKept;
   cfg.strategy.honest = Math.max(0, 1 - pbKept - other);
 
-  // 随机种子与种子范围的结束值。结束值大于起始值就走批量，内核把中间每个
-  // 种子都跑一遍再汇总。填一样、填更小，或者留空，都当单次跑。
+  // 随机种子跑几个。从随机种子开始连跑 count 个，内核把中间每个
+  // 种子都跑一遍再汇总。填 1 或者清空，都当单次跑。
   const seedA = Math.max(0, Math.round(num(ui.seed)));
-  const seedB = ui.seed_to.value === "" ? seedA : Math.max(0, Math.round(Number(ui.seed_to.value)));
+  const count = Math.max(1, Math.round(num(ui.seed_count)) || 1);
   cfg.sim.seed = seedA;
-  cfg.sim.seed_to = seedB > seedA ? seedB : null;
+  cfg.sim.seed_to = count > 1 ? seedA + count - 1 : null;
   // 仿真窗口比高峰窗口多半小时。多出来的是恢复期，不然最后一批人刚到电梯厅
   // 仿真就结束了，完成人数会偏低。
   cfg.sim.horizon_s = num(ui.window) * 60 + 1800;
@@ -263,6 +263,9 @@ function loadIntoUi(cfg) {
   ui.pressb.value = cfg.strategy.press_both || 0;
 
   ui.seed.value = cfg.sim.seed;
+  ui.seed_count.value = cfg.sim.seed_to && cfg.sim.seed_to > cfg.sim.seed
+    ? cfg.sim.seed_to - cfg.sim.seed + 1
+    : 1;
   syncLabels();
 }
 
@@ -646,7 +649,7 @@ async function main() {
   const kick = debounce(() => run(), 90);
   for (const id of ["res_floors", "units", "ppu", "fh", "basement", "gfr", "ncars", "load",
     "speed", "stops", "pattern", "dep", "window", "ret", "stairs", "pressb", "overload",
-    "router", "seed", "seed_to"]) {
+    "router", "seed", "seed_count"]) {
     ui[id].addEventListener("input", () => { syncLabels(); kick(); });
     ui[id].addEventListener("change", () => { syncLabels(); kick(); });
   }
