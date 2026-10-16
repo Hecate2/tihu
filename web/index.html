@@ -49,7 +49,7 @@
         <input type="number" id="fh" min="2.4" max="6" step="0.1" value="3">
       </div>
       <div class="row">
-        <label for="basement">地下层数<span class="hint">B1、B2，可以下车库</span></label>
+        <label for="basement">地下层数<span class="hint">有人直接下车库，不走大堂</span></label>
         <input type="number" id="basement" min="0" max="3" step="1" value="0">
       </div>
       <div class="check">
@@ -73,9 +73,9 @@
         <input type="number" id="speed" min="0.3" max="20" step="0.01" value="1.75" list="speed_tiers">
       </div>
       <datalist id="speed_tiers"></datalist>
-      <p class="hint note">常见档位 1.0、1.6、1.75、2.5、3.0 米每秒。写字楼的高速梯常在 4 到 6 米每秒，超高层有 10 米每秒以上的。加减速度按最接近的档位取。</p>
+      <p class="hint note">常见档位 1.0、1.6、1.75、2.5、3.0 米每秒。写字楼的高速梯常在 4 到 6 米每秒，超高层有 10 米每秒以上的。加减速度取最接近档位的值。</p>
       <div class="row">
-        <label for="stops">停靠区域<span class="hint">分区梯会改变谁挤得上</span></label>
+        <label for="stops">停靠区域<span class="hint">不同梯停不同层</span></label>
         <select id="stops">
           <option value="all" selected>每台都全停</option>
           <option value="parity">单双层分开</option>
@@ -107,7 +107,7 @@
         <input type="number" id="window" min="10" max="180" step="5" value="60">
       </div>
       <div class="row">
-        <label for="ret">中途折返比例<span class="hint">出门后再回来的人</span></label>
+        <label for="ret">中途折返比例<span class="hint">出门后又回来的人</span></label>
         <div class="range-wrap">
           <input type="range" id="ret" min="0" max="0.2" step="0.005" value="0.005">
           <span class="range-val" id="ret_v">0.5%</span>
@@ -119,10 +119,10 @@
       <legend>行为</legend>
       <div class="check">
         <input type="checkbox" id="stairs" checked>
-        <label for="stairs">有人走楼梯</label>
+        <label for="stairs">有人走楼梯<span class="hint">约 2 到 5% 的人，多住 2 到 6 层</span></label>
       </div>
       <div class="row">
-        <label for="pressb">乱按比例<span class="hint">上下都按，多占一台梯</span></label>
+        <label for="pressb">乱按比例<span class="hint">上下都按，多叫一台梯</span></label>
         <div class="range-wrap">
           <input type="range" id="pressb" min="0" max="0.5" step="0.05" value="0">
           <span class="range-val" id="pressb_v">0%</span>
@@ -130,7 +130,7 @@
       </div>
       <div class="check">
         <input type="checkbox" id="overload">
-        <label for="overload">超载后可能没人愿意下车<span class="hint">罕见，默认关闭</span></label>
+        <label for="overload">超载后轿厢卡死<span class="hint">极少见，默认关闭</span></label>
       </div>
     </fieldset>
 
@@ -141,7 +141,7 @@
         <select id="router"></select>
       </div>
       <div class="algo">
-        <p class="hint note">新按下的一条外呼派给哪台轿厢，由内核的派梯规则统一负责，三种算法在这一层完全一样。这里选的是车开出去之后怎么走，选中哪条下面就会加粗。</p>
+        <p class="hint note">刚按下的按钮分给哪台梯，统一规则说了算，三种算法都一样。这里只管车开出去后怎么走，选中的那条会变色。</p>
         <ul id="router_list"></ul>
       </div>
       <div class="row">
@@ -184,7 +184,7 @@
       <div class="card">
         <div class="k">门到门 P90</div>
         <div class="v" id="v_d2d">—<small>秒</small></div>
-        <div class="n">从按电梯到出电梯</div>
+        <div class="n">从进电梯厅到出电梯</div>
       </div>
     </div>
 

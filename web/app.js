@@ -477,7 +477,7 @@ async function run() {
     } catch (e) {
       // 工人起不来就回退同步，保证旧环境照样出数
       if (token !== runToken) return;
-      setNote("并行没跑起来，改同步重跑…");
+      setNote("并行失败，逐个重跑…");
       await new Promise((r) => setTimeout(r, 0));
       if (token !== runToken) return;
       try {
@@ -588,19 +588,19 @@ function render(s) {
   const declined = s.floors.reduce((a, f) => a + f.declined, 0);
   const noSpace = s.floors.reduce((a, f) => a + f.no_space, 0);
   const rows2 = [
-    ["生成人数 / 送达人数", s.pax_total + " / " + s.pax_served],
+    ["总人数 / 送达人数", s.pax_total + " / " + s.pax_served],
     ["送达比例", fmt(s.serve_ratio * 100, 1) + "%"],
     ["出门前就走楼梯", s.stair_users + "（" + fmt(s.stair_share * 100, 1) + "%）"],
     ["半路改走楼梯", s.abandoned + " 人"],
     ["被跳过：位子不够", noSpace + " 次"],
     ["被跳过：人不愿挤", declined + " 次"],
-    ["幽灵停站", s.ghost_stops + " 次"],
-    ["满载直驶跳过", s.full_bypasses + " 次"],
-    ["制动不及，越站", s.overshoots + " 次"],
-    ["往返时间均值", fmt(s.rtt_mean) + " 秒"],
-    ["五分钟输送", fmt(s.throughput_5min) + " 人"],
-    ["超载死锁", s.stalls + " 次，累计 " + fmt(s.stall_seconds) + " 秒"],
-    ["被僵局请下车", s.pax_after_stall + " 人"],
+    ["白停一次", s.ghost_stops + " 次"],
+    ["满员直接开过", s.full_bypasses + " 次"],
+    ["太快停不住", s.overshoots + " 次"],
+    ["跑一圈平均用时", fmt(s.rtt_mean) + " 秒"],
+    ["每 5 分钟送走", fmt(s.throughput_5min) + " 人"],
+    ["超载卡死", s.stalls + " 次，累计 " + fmt(s.stall_seconds) + " 秒"],
+    ["超载被请下车", s.pax_after_stall + " 人"],
   ];
   document.getElementById("balance").innerHTML = rows2
     .map((r) => `<tr><td>${escHtml(r[0])}</td><td>${escHtml(r[1])}</td></tr>`)
@@ -608,7 +608,7 @@ function render(s) {
 
   setNote(runs > 1
     ? "共跑 " + runs + " 个种子，从 " + s.seed_from + " 到 " + s.seed_to +
-      "。秒数与比例取各次的平均，样本数也是每次的平均。"
+      "。秒数和比例是各次的平均值，样本数也是平均值。"
     : "");
 }
 

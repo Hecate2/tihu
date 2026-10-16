@@ -83,7 +83,7 @@ function barChartPair(rows, opts) {
     const db = Math.max(dv > 0 ? 1.5 : 0, (dv / max) * o.barW);
     const tip =
       r.label + "：等梯均值 " + wv.toFixed(o.digits) + " 秒，P50 " + (r.waitP50 || 0).toFixed(o.digits) +
-      "，P90 " + (r.waitP90 || 0).toFixed(o.digits) + "；门到门均值 " + dv.toFixed(o.digits) +
+      "，P90 " + (r.waitP90 || 0).toFixed(o.digits) + "。门到门均值 " + dv.toFixed(o.digits) +
       " 秒，P50 " + (r.d2dP50 || 0).toFixed(o.digits) + "，P90 " + (r.d2dP90 || 0).toFixed(o.digits);
     s += `<g><title>${esc(tip)}</title>`;
     s += `<text x="${o.labelW - 6}" y="${y + 19}" fill="#97a3b4" font-size="11" text-anchor="end">${esc(r.label)}</text>`;
@@ -143,7 +143,7 @@ function barChartRangePair(rows, opts) {
     const dm = lane(r.d2dMean, r.d2dBest, r.d2dWorst, y + 16, "#4aa3ff", "#4aa3ff");
     const tip =
       r.label + "：等梯平均 " + wm.m.toFixed(o.digits) + " 秒，最短 " + wm.b.toFixed(o.digits) +
-      "，最长 " + wm.t.toFixed(o.digits) + "；门到门平均 " + dm.m.toFixed(o.digits) + " 秒，最短 " +
+      "，最长 " + wm.t.toFixed(o.digits) + "。门到门平均 " + dm.m.toFixed(o.digits) + " 秒，最短 " +
       dm.b.toFixed(o.digits) + "，最长 " + dm.t.toFixed(o.digits) + "，" + (r.live || 0) + " 次运行有人从这里出发";
     s += `<g><title>${esc(tip)}</title>`;
     s += `<text x="${o.labelW - 6}" y="${y + 20}" fill="#97a3b4" font-size="11" text-anchor="end">${esc(r.label)}</text>`;
@@ -157,7 +157,7 @@ function barChartRangePair(rows, opts) {
 
 /**
  * 竖向柱状图，用来画等待时间的分布。
- * bins: 每格的样本数；binS: 格宽（秒）。
+ * bins 是每格样本数，binS 是格宽秒数。
  */
 function histogram(bins, binS, opts) {
   const o = Object.assign({ w: 460, h: 150, unit: "s" }, opts);
