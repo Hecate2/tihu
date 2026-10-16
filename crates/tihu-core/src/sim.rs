@@ -542,7 +542,8 @@ fn register_calls(w: &mut World, level: i16, newly: &[usize]) -> Vec<u32> {
     pre_owned
 }
 
-/// 把一条外呼插进某台正在途中的轿厢。制动来不及就跳过，记一次越站。
+/// 把一条外呼插进某台正在途中的轿厢。真刹不住才记一次越站，
+/// 车已经开过的楼层只跳过不记：那不是刹不住，是车已经走了。
 fn plan_for_moving(w: &mut World, id: CarId, level: i16, dir: Dir) {
     if w.cars[id].phase != CarPhase::Moving {
         return;
@@ -550,23 +551,41 @@ fn plan_for_moving(w: &mut World, id: CarId, level: i16, dir: Dir) {
     if w.cars[id].dir != dir {
         return;
     }
-    if !can_stop_at(w, id, level) {
-        w.cars[id].overshoots += 1;
-        return;
+    match brake_check(w, id, level) {
+        Brake::Stop => {
+            let pair = (level, dir);
+            if !w.cars[id].stops_planned.contains(&pair) {
+                w.cars[id].stops_planned.push(pair);
+            }
+        }
+        Brake::Passed => {}
+        Brake::Overshoot => {
+            w.cars[id].overshoots += 1;
+        }
     }
-    let pair = (level, dir);
-    if !w.cars[id].stops_planned.contains(&pair) {
-        w.cars[id].stops_planned.push(pair);
-    }
+}
+
+/// 制动检查的结果。`Passed` 与 `Overshoot` 都插不进去，
+/// 但只有后者是真的刹不住。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Brake {
+    /// 来得及刹住，可以插进去
+    Stop,
+    /// 已经开过这一层，插不进去，但不记越站
+    Passed,
+    /// 还没到，但剩余距离不够刹停，记一次越站
+    Overshoot,
 }
 
 /// 正在途中时，现在还来不来得及刹到 `level` 层。
 ///
-/// 车已经开过、或者剩余距离短于从当前速度刹停所需的距离，都来不及。
-fn can_stop_at(w: &World, id: CarId, level: i16) -> bool {
+/// 车已经开过、或者剩余距离短于从当前速度刹停所需的距离，都插不进去，
+/// 但只有后者算越站。低速梯制动距离短，几乎不该出现 Overshoot，
+/// 见 `docs/MODEL.md` 第 3.8 节。
+fn brake_check(w: &World, id: CarId, level: i16) -> Brake {
     let c = &w.cars[id];
     if c.phase != CarPhase::Moving {
-        return true;
+        return Brake::Stop;
     }
     let spec = &w.cfg.cars[id];
     let floor_h = w.cfg.building.floor_height as f64;
@@ -580,10 +599,17 @@ fn can_stop_at(w: &World, id: CarId, level: i16) -> bool {
     let remaining = (target_pos - car_pos) * sign;
     if remaining <= 0.0 {
         // 已经越过或正好在这一层
-        return remaining > -1e-9;
+        if remaining > -1e-9 {
+            return Brake::Stop;
+        }
+        return Brake::Passed;
     }
     let brake = decel_distance(speed, *profile) + speed * BRAKE_REACTION_S;
-    remaining + 1e-9 >= brake
+    if remaining + 1e-9 >= brake {
+        Brake::Stop
+    } else {
+        Brake::Overshoot
+    }
 }
 
 /// 推进一步轿厢状态机。
@@ -1442,11 +1468,52 @@ mod tests {
         w.cars[0].leg_dist = 29.0 * w.cfg.building.floor_height as f64;
         w.cars[0].dir = Dir::Up;
         w.cars[0].phase = CarPhase::Moving;
-        // 车刚起步就有人按 2 层，这时它已经很快了
-        w.now = 6.0;
-        assert!(!can_stop_at(&w, 0, 2), "高速车刚起步时刹不住 2 层");
+        // 车跑起来之后有人按 2 层：t=2.5 时车在 2.5 米处速度 2.0，
+        // 剩 0.5 米不够刹停（要 3.3 米），真刹不住
+        w.now = 2.5;
+        assert_eq!(brake_check(&w, 0, 2), Brake::Overshoot, "高速车跑起来刹不住 2 层");
+        let before = w.cars[0].overshoots;
+        plan_for_moving(&mut w, 0, 2, Dir::Up);
+        assert_eq!(w.cars[0].overshoots, before + 1, "真刹不住要记一次越站");
         w.now = 0.0;
-        assert!(can_stop_at(&w, 0, 2), "刚起步时应当刹得住");
+        assert_eq!(brake_check(&w, 0, 2), Brake::Stop, "刚起步时应当刹得住");
+    }
+
+    /// 已经开过的楼层不算越站：那不是刹不住，是车已经走了。
+    /// 低速档制动加反应只有 1.72 米，物理上不存在刹不住的下一层，
+    /// 按键晚了一步不该记到它头上，更不该插一个追不上的停靠。
+    #[test]
+    fn passed_floor_is_not_an_overshoot() {
+        let mut c = Config::default();
+        c.building.top_level = 30;
+        c.building.units_per_floor = vec![4; 30];
+        let mut spec = CarSpec::default();
+        spec.up = crate::motion::MotionProfile::preset("low_rise_1_0").unwrap();
+        spec.down = spec.up;
+        c.cars = vec![spec];
+        let mut w = World::new(c);
+        w.cars[0].leg_from = 1;
+        w.cars[0].leg_target = 30;
+        w.cars[0].leg_start = 0.0;
+        w.cars[0].leg_dist = 29.0 * w.cfg.building.floor_height as f64;
+        w.cars[0].dir = Dir::Up;
+        w.cars[0].phase = CarPhase::Moving;
+        // 车已经开过 2 层十几米：1.0 档早就把它甩在身后，
+        // 这时按 2 层既插不进去，也不该记越站
+        w.now = 20.0;
+        assert_eq!(brake_check(&w, 0, 2), Brake::Passed);
+        let before = w.cars[0].overshoots;
+        plan_for_moving(&mut w, 0, 2, Dir::Up);
+        assert_eq!(w.cars[0].overshoots, before, "开过的楼层不该记越站");
+        assert!(
+            !w.cars[0].stops_planned.contains(&(2, Dir::Up)),
+            "开过的楼层也不该插停靠"
+        );
+        // 同一时刻，前方下一层来得及刹：正常插入，不记数
+        assert_eq!(brake_check(&w, 0, 8), Brake::Stop, "低速档前方应当刹得住");
+        plan_for_moving(&mut w, 0, 8, Dir::Up);
+        assert_eq!(w.cars[0].overshoots, before);
+        assert!(w.cars[0].stops_planned.contains(&(8, Dir::Up)));
     }
 
     /// 停靠语义：内核只按「有人要下」和「预定了要接人」两条决定停靠。
