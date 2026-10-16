@@ -438,6 +438,17 @@ function syncRun(cfg, routerId) {
   return { sim: res.sim, issues: res.issues };
 }
 
+// 把当前网址（含全部参数）拷进剪贴板。上下两组按钮共用，按下的那颗变字提示。
+async function copyLink(e) {
+  try {
+    await navigator.clipboard.writeText(location.href);
+    e.target.textContent = "已复制";
+  } catch (err) {
+    e.target.textContent = "复制失败";
+  }
+  setTimeout(() => (e.target.textContent = "复制配置链接"), 1200);
+}
+
 async function run() {
   const token = ++runToken;
   const cfg = applyUi(clone(base));
@@ -654,16 +665,8 @@ async function main() {
     ui[id].addEventListener("change", () => { syncLabels(); kick(); });
   }
 
-  document.getElementById("run").addEventListener("click", () => run());
-  document.getElementById("link").addEventListener("click", async (e) => {
-    try {
-      await navigator.clipboard.writeText(location.href);
-      e.target.textContent = "已复制";
-    } catch (err) {
-      e.target.textContent = "复制失败";
-    }
-    setTimeout(() => (e.target.textContent = "复制配置链接"), 1200);
-  });
+  document.querySelectorAll('[data-act="run"]').forEach((b) => b.addEventListener("click", () => run()));
+  document.querySelectorAll('[data-act="link"]').forEach((b) => b.addEventListener("click", copyLink));
 
   loadIntoUi(base);
 
