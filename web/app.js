@@ -394,9 +394,11 @@ function render(s) {
   document.getElementById("v_bypass").innerHTML = fmt(s.pax_any_bypass * 100, 1) + "<small>%</small>";
   document.getElementById("v_d2d").innerHTML = fmt(s.door_to_door.p90) + "<small>秒</small>";
 
-  // 逐层图：最高的层画在最上面，读起来像一栋楼
+  // 逐层图：最高的层画在最上面，读起来像一栋楼。
+  // 批量报告的人数是各次的平均再取整，平均不到半个人会被轮成 0，
+  // 这种层看 live，有种子真发过车就留着，不然会被藏掉。
   const floors = s.floors
-    .filter((f) => f.count > 0 || f.stair_users > 0)
+    .filter((f) => f.count > 0 || f.stair_users > 0 || (f.live || 0) > 0)
     .slice()
     .reverse();
   const box = document.getElementById("chart_floor");
