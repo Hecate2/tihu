@@ -129,21 +129,24 @@ function stopsFor(i, n, top, basement) {
 // 把界面上的值写进配置对象。只碰用户能调的那些字段，预设带进来的其他内容
 // （比如层间客流的每股占比）一律原样留着。
 function applyUi(cfg) {
-  const top = num(ui.res_floors); // 填 N 就是 1 到 N 层，主入口层是 1 层
-  const units = num(ui.units);
+  // 整数框里手输小数、负数或者清空，都先收成合法整数再往下走。
+  // 不然 new Array(2.5) 直接抛 RangeError，连内核的校验错误都看不到。
+  const top = Math.max(1, Math.round(num(ui.res_floors)) || 1); // 填 N 就是 1 到 N 层，主入口层是 1 层
+  const units = Math.max(0, Math.round(num(ui.units)) || 0);
+  const basement = Math.max(0, Math.round(num(ui.basement)) || 0);
   const gfr = ui.gfr.checked;
 
   cfg.building.top_level = top;
   cfg.building.floor_height = num(ui.fh);
   cfg.building.persons_per_unit = num(ui.ppu);
-  cfg.building.basement_levels = num(ui.basement);
+  cfg.building.basement_levels = basement;
   cfg.building.ground_floor_residential = gfr;
   const floors = new Array(top);
   for (let i = 0; i < top; i++) floors[i] = units;
   floors[0] = gfr ? units : 0;
   cfg.building.units_per_floor = floors;
 
-  const n = num(ui.ncars);
+  const n = Math.max(1, Math.round(num(ui.ncars)) || 1);
   const load = num(ui.load);
   // 速度可以填任意小数。清了输入框或者填了怪值就退回 1.75，不让内核拿到 0。
   const raw = Number(ui.speed.value);
@@ -168,8 +171,9 @@ function applyUi(cfg) {
   cfg.traffic.window_s = num(ui.window) * 60;
   cfg.traffic.return_ratio = num(ui.ret);
   if (cfg.traffic.pattern === "inter_floor" && (!cfg.traffic.flows || !cfg.traffic.flows.length)) {
+    // 滑块是多少就是多少，不再往 0.35 钳。原来钳了也不回写滑块，
+    // 界面显示 66% 而实际按 35% 跑，对不上。
     cfg.traffic.flows = defaultFlows(top);
-    cfg.traffic.departure_ratio = Math.min(cfg.traffic.departure_ratio, 0.35);
   }
 
   cfg.stairs.enabled = ui.stairs.checked;
@@ -196,15 +200,28 @@ function applyUi(cfg) {
 
 // 层间交通的默认客流。用户切到层间模式又没给客流表时补一份，
 // 起终点取楼层中段的几对，避免出现「一层都没有」的校验错误。
+// 层太少时凑不出两对不同的层，直接用主入口层与顶层对开，
+// 不然会出现起终点相同的自环流，内核会静默丢弃那几股。
 function defaultFlows(top) {
-  const a = 2 + Math.floor((top - 2) / 4);
-  const b = top - Math.max(1, Math.floor((top - 2) / 3));
-  return [
+  const t = Math.max(2, Math.round(top) || 2);
+  let a = 2 + Math.floor((t - 2) / 4);
+  let b = t - Math.max(1, Math.floor((t - 2) / 3));
+  a = Math.min(t, Math.max(1, a));
+  b = Math.min(t, Math.max(1, b));
+  const flows = [
     { from: a, to: b, share: 0.35 },
     { from: b, to: a, share: 0.30 },
-    { from: 2, to: top, share: 0.20 },
-    { from: top, to: 2, share: 0.15 },
-  ];
+    { from: Math.min(2, t), to: t, share: 0.20 },
+    { from: t, to: Math.min(2, t), share: 0.15 },
+  ].filter((f) => f.from !== f.to);
+  // 层太少时上面会被滤空，直接用主入口层与顶层对开
+  if (!flows.length) {
+    return [
+      { from: 1, to: t, share: 0.5 },
+      { from: t, to: 1, share: 0.5 },
+    ];
+  }
+  return flows;
 }
 
 // 反过来：把一份配置回填到控件上，预设按钮点下去就走这条。
