@@ -166,6 +166,14 @@ pub struct FloorStats {
     pub wait_max: f64,
     /// 等待时间直方图
     pub wait_samples: Summary,
+    /// 门到门时间之和。只记真正坐上车走完这一腿的人，中途弃梯的不进
+    pub d2d_sum: f64,
+    /// 门到门时间均值，分母是坐上车的人数，不是 `count`
+    pub d2d_mean: f64,
+    /// 门到门时间最大值
+    pub d2d_max: f64,
+    /// 门到门时间直方图
+    pub d2d_samples: Summary,
     /// 被跳过的总次数
     pub bypass_total: u32,
     /// 至少被跳过一次的乘客数

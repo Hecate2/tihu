@@ -109,8 +109,18 @@ pub struct FloorAvg {
     pub wait_worst: f64,
     /// 有几个种子这一层真有人出发。零样本的种子不进上面三个数
     pub live: usize,
+    pub wait_p50: f64,
     pub wait_p90: f64,
     pub wait_max: f64,
+    /// 各次运行该层门到门均值的平均
+    pub d2d_mean: f64,
+    /// 各次运行该层门到门均值里最短的那次
+    pub d2d_best: f64,
+    /// 各次运行该层门到门均值里最长的那次
+    pub d2d_worst: f64,
+    pub d2d_p50: f64,
+    pub d2d_p90: f64,
+    pub d2d_max: f64,
     pub bypass_total: f64,
     pub declined: f64,
     pub no_space: f64,
@@ -121,14 +131,21 @@ pub struct FloorAvg {
 struct FloorAcc {
     count: Acc,
     wait: Acc,
+    wait_p50: Acc,
     p90: Acc,
     wait_max: Acc,
+    d2d: Acc,
+    d2d_p50: Acc,
+    d2d_p90: Acc,
+    d2d_max: Acc,
     bypass_total: Acc,
     declined: Acc,
     no_space: Acc,
     stair_users: Acc,
     best: f64,
     worst: f64,
+    d2d_best: f64,
+    d2d_worst: f64,
     live: usize,
 }
 
@@ -137,14 +154,21 @@ impl Default for FloorAcc {
         Self {
             count: Acc::default(),
             wait: Acc::default(),
+            wait_p50: Acc::default(),
             p90: Acc::default(),
             wait_max: Acc::default(),
+            d2d: Acc::default(),
+            d2d_p50: Acc::default(),
+            d2d_p90: Acc::default(),
+            d2d_max: Acc::default(),
             bypass_total: Acc::default(),
             declined: Acc::default(),
             no_space: Acc::default(),
             stair_users: Acc::default(),
             best: f64::INFINITY,
             worst: 0.0,
+            d2d_best: f64::INFINITY,
+            d2d_worst: 0.0,
             live: 0,
         }
     }
@@ -160,10 +184,18 @@ impl FloorAcc {
         if f.count > 0 {
             self.live += 1;
             self.wait.add(f.wait_mean);
+            self.wait_p50.add(f.wait_samples.p50());
             self.p90.add(f.wait_samples.p90());
             self.wait_max.add(f.wait_max);
             self.best = self.best.min(f.wait_mean);
             self.worst = self.worst.max(f.wait_mean);
+            // 门到门与等待同一次进出，live 口径一致
+            self.d2d.add(f.d2d_mean);
+            self.d2d_p50.add(f.d2d_samples.p50());
+            self.d2d_p90.add(f.d2d_samples.p90());
+            self.d2d_max.add(f.d2d_max);
+            self.d2d_best = self.d2d_best.min(f.d2d_mean);
+            self.d2d_worst = self.d2d_worst.max(f.d2d_mean);
         }
     }
 
@@ -175,8 +207,15 @@ impl FloorAcc {
             wait_best: if live { self.best } else { 0.0 },
             wait_worst: if live { self.worst } else { 0.0 },
             live: self.live,
+            wait_p50: self.wait_p50.mean(),
             wait_p90: self.p90.mean(),
             wait_max: self.wait_max.mean(),
+            d2d_mean: self.d2d.mean(),
+            d2d_best: if live { self.d2d_best } else { 0.0 },
+            d2d_worst: if live { self.d2d_worst } else { 0.0 },
+            d2d_p50: self.d2d_p50.mean(),
+            d2d_p90: self.d2d_p90.mean(),
+            d2d_max: self.d2d_max.mean(),
             bypass_total: self.bypass_total.mean(),
             declined: self.declined.mean(),
             no_space: self.no_space.mean(),
@@ -439,6 +478,22 @@ mod tests {
             assert!((fa.wait_best - best).abs() < 1e-9, "第 {i} 格较好值不符");
             assert!((fa.wait_worst - worst).abs() < 1e-9, "第 {i} 格较差值不符");
             assert!(fa.wait_best <= fa.wait_mean + 1e-9 && fa.wait_mean <= fa.wait_worst + 1e-9);
+            // 门到门走同一套口径
+            let dlive: Vec<f64> = singles
+                .iter()
+                .filter(|m| m.by_floor[i].count > 0)
+                .map(|m| m.by_floor[i].d2d_mean)
+                .collect();
+            assert_eq!(dlive.len(), live.len(), "第 {i} 格门到门的样本次数对不上");
+            if !dlive.is_empty() {
+                let dmean = dlive.iter().sum::<f64>() / dlive.len() as f64;
+                assert!((fa.d2d_mean - dmean).abs() < 1e-9, "第 {i} 格门到门均值不符");
+                let dbest = dlive.iter().copied().fold(f64::INFINITY, f64::min);
+                let dworst = dlive.iter().copied().fold(0.0, f64::max);
+                assert!((fa.d2d_best - dbest).abs() < 1e-9, "第 {i} 格门到门较好值不符");
+                assert!((fa.d2d_worst - dworst).abs() < 1e-9, "第 {i} 格门到门较差值不符");
+                assert!(fa.d2d_best <= fa.d2d_mean + 1e-9 && fa.d2d_mean <= fa.d2d_worst + 1e-9);
+            }
         }
 
         // 分布图是各次相加

@@ -931,6 +931,11 @@ fn board_and_alight<B: Boarding>(
         fs.wait_sum += wait;
         fs.wait_max = fs.wait_max.max(wait);
         fs.wait_samples.add(wait);
+        // 门到门只记坐上车走完的人。中途弃梯的在另一条路径里只记等待，
+        // 这里不记，保持与全局 door_to_door 同一口径
+        fs.d2d_sum += d2d;
+        fs.d2d_max = fs.d2d_max.max(d2d);
+        fs.d2d_samples.add(d2d);
         fs.bypass_total += pax.bypass_count;
         if pax.bypass_count > 0 {
             fs.bypassed += 1;
@@ -1238,6 +1243,11 @@ fn collect(w: &World, stalls: usize, stall_seconds: f64, mut m: Metrics) -> Metr
     for s in m.by_floor.iter_mut() {
         if s.count > 0 {
             s.wait_mean = s.wait_sum / s.count as f64;
+        }
+        // 门到门的分母只数坐上车的人。中途弃梯的进了 count 却没进 d2d，
+        // 按 count 除会把均值稀释掉
+        if s.d2d_samples.count > 0 {
+            s.d2d_mean = s.d2d_sum / s.d2d_samples.count as f64;
         }
     }
 
@@ -1707,6 +1717,44 @@ mod tests {
         let r = default_run(c);
         assert_eq!(r.metrics.stalls, 0);
         assert_eq!(r.metrics.stall_seconds, 0.0);
+    }
+
+    /// 逐层门到门与全局口径一致：每人门到门不短于等待，
+    /// 各层门到门之和等于全局门到门之和。
+    #[test]
+    fn floor_door_to_door_is_consistent() {
+        let c = Config::default();
+        let r = default_run(c);
+        for p in &r.world.pax {
+            if p.hops_done > 0 && !p.used_stairs && !p.abandoned && p.t_board > 0.0 && p.t_exit > 0.0
+            {
+                assert!(
+                    p.door_to_door() + 1e-9 >= p.wait(),
+                    "门到门 {} 短于等待 {}",
+                    p.door_to_door(),
+                    p.wait()
+                );
+            }
+        }
+        let mut sum = 0.0;
+        let mut n = 0u64;
+        for f in &r.metrics.by_floor {
+            assert!(
+                f.d2d_samples.count <= f.count as u64,
+                "门到门样本 {} 超过该层人数 {}",
+                f.d2d_samples.count,
+                f.count
+            );
+            if f.d2d_samples.count > 0 {
+                let mean = f.d2d_sum / f.d2d_samples.count as f64;
+                assert!((f.d2d_mean - mean).abs() < 1e-9, "门到门均值口径不对");
+                assert!(f.d2d_max + 1e-9 >= f.d2d_mean, "门到门最大值小于均值");
+            }
+            sum += f.d2d_sum;
+            n += f.d2d_samples.count;
+        }
+        assert!((sum - r.metrics.door_to_door.sum).abs() < 1e-6, "各层门到门之和对不上全局");
+        assert_eq!(n, r.metrics.door_to_door.count, "各层门到门样本数对不上全局");
     }
 
     /// 没人呼叫时，算法也能主动把轿厢挪到想待的那一层。

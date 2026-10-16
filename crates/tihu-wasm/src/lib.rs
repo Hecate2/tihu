@@ -100,8 +100,13 @@ struct FloorRow {
     label: String,
     count: u32,
     wait_mean: f64,
+    wait_p50: f64,
     wait_p90: f64,
     wait_max: f64,
+    d2d_mean: f64,
+    d2d_p50: f64,
+    d2d_p90: f64,
+    d2d_max: f64,
     bypass_total: u32,
     declined: u32,
     no_space: u32,
@@ -112,6 +117,12 @@ struct FloorRow {
     /// 各次运行该层平均等待时间里最长的那次。单次运行时不出现
     #[serde(skip_serializing_if = "Option::is_none")]
     wait_worst: Option<f64>,
+    /// 各次运行该层门到门均值里最短的那次。单次运行时不出现
+    #[serde(skip_serializing_if = "Option::is_none")]
+    d2d_best: Option<f64>,
+    /// 各次运行该层门到门均值里最长的那次。单次运行时不出现
+    #[serde(skip_serializing_if = "Option::is_none")]
+    d2d_worst: Option<f64>,
     /// 有几个种子的这一层真有人出发。单次运行时不出现
     #[serde(skip_serializing_if = "Option::is_none")]
     live: Option<usize>,
@@ -204,14 +215,21 @@ impl SimReport {
                     label: level_label(level),
                     count: f.count,
                     wait_mean: r3(f.wait_mean),
+                    wait_p50: r3(f.wait_samples.p50()),
                     wait_p90: r3(f.wait_samples.p90()),
                     wait_max: r3(f.wait_max),
+                    d2d_mean: r3(f.d2d_mean),
+                    d2d_p50: r3(f.d2d_samples.p50()),
+                    d2d_p90: r3(f.d2d_samples.p90()),
+                    d2d_max: r3(f.d2d_max),
                     bypass_total: f.bypass_total,
                     declined: f.declined,
                     no_space: f.no_space,
                     stair_users: f.stair_users,
                     wait_best: None,
                     wait_worst: None,
+                    d2d_best: None,
+                    d2d_worst: None,
                     live: None,
                 }
             })
@@ -283,14 +301,21 @@ impl SimReport {
                     label: level_label(level),
                     count: f.count.round() as u32,
                     wait_mean: r3(f.wait_mean),
+                    wait_p50: r3(f.wait_p50),
                     wait_p90: r3(f.wait_p90),
                     wait_max: r3(f.wait_max),
+                    d2d_mean: r3(f.d2d_mean),
+                    d2d_p50: r3(f.d2d_p50),
+                    d2d_p90: r3(f.d2d_p90),
+                    d2d_max: r3(f.d2d_max),
                     bypass_total: f.bypass_total.round() as u32,
                     declined: f.declined.round() as u32,
                     no_space: f.no_space.round() as u32,
                     stair_users: f.stair_users.round() as u32,
                     wait_best: Some(r3(f.wait_best)),
                     wait_worst: Some(r3(f.wait_worst)),
+                    d2d_best: Some(r3(f.d2d_best)),
+                    d2d_worst: Some(r3(f.d2d_worst)),
                     live: Some(f.live),
                 }
             })
@@ -724,6 +749,17 @@ mod tests {
                 continue;
             }
             assert!(b <= m + 1e-9 && m <= w + 1e-9, "第 {f} 层较好 ≤ 平均 ≤ 较差不成立");
+            let (db, dm, dw) = (
+                f["d2d_best"].as_f64().unwrap(),
+                f["d2d_mean"].as_f64().unwrap(),
+                f["d2d_worst"].as_f64().unwrap(),
+            );
+            if f["live"].as_u64().unwrap() == 0 {
+                assert_eq!((db, dm, dw), (0.0, 0.0, 0.0), "没人出发的楼层门到门三个值都该是 0");
+                continue;
+            }
+            assert!(db <= dm + 1e-9 && dm <= dw + 1e-9, "第 {f} 层门到门较好 ≤ 平均 ≤ 较差不成立");
+            assert!(dm + 1e-9 >= m, "第 {f} 层门到门均值不该小于等待均值");
         }
     }
 
@@ -759,6 +795,7 @@ mod tests {
         let r = report_json(&default_config_json(), "down_peak_sweep");
         assert!(!r.contains("\"runs\""), "单次报告不该带 runs：{r}");
         assert!(!r.contains("wait_best"), "单次报告不该带 wait_best：{r}");
+        assert!(!r.contains("d2d_best"), "单次报告不该带 d2d_best：{r}");
         assert!(!r.contains("seed_to"), "单次报告不该带 seed_to：{r}");
     }
 
