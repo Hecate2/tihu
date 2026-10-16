@@ -35,6 +35,9 @@ pub struct Pax {
     pub dwell_s: f64,
     /// 愿意在电梯厅等多久。超过就改走楼梯
     pub patience_s: f64,
+    /// 当前这条腿的耐心截止时刻。换腿和僵局重排都会往后推，
+    /// 旧事件到点就忽略，只认这一个，见 `abandon_to_stairs`
+    pub abandon_at: f64,
     /// 按键策略
     pub strategy: Strategy,
     /// 个人拒挤度，0 最愿意挤，1 最不愿意
@@ -587,6 +590,7 @@ impl World {
                 abandoned: false,
                 reversal_floor: None,
                 requeued_after_stall: false,
+                abandon_at: f64::INFINITY,
                 hops_done: 0,
                 final_exit: 0.0,
             };

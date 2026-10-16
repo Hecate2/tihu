@@ -125,12 +125,12 @@ CUDA 锁死 NVIDIA，HIP 锁死 AMD。都不支持苹果。用了它们，「多
 | 位置 | 状态 |
 | --- | --- |
 | `crates/tihu-cli/src/main.rs` | 只有 `fn main() {}`。没有 run、sweep、bench、evolve |
-| `crates/tihu-wasm/src/lib.rs` | 零字节。没有导出任何函数 |
-| `web/` | 空目录。没有页面、没有图表 |
+| `crates/tihu-wasm/src/lib.rs` | 约九百行，手写 ABI，配置 JSON 进报告 JSON 出，见 `ARCHITECTURE.md` 第 7 节 |
+| `web/` | 六个文件，无框架无依赖，`make single` 产出双击可用的单文件版 |
 | `benches/` | 空。所有性能数字都还没有 |
 | `harness/` | 空。红线验收脚本没写 |
 
-网页与命令行是 `README.md` 承诺的两条腿，现在两条都还没有。
+网页这条腿有了，命令行的 `run` 子命令还没有。README 承诺的两条腿，目前一条。
 
 ### 4.2 统计口径欠账
 

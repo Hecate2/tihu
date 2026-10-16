@@ -97,6 +97,7 @@ pub fn run<R: Router, A: Assigner, B: Boarding>(
         // 等得不耐烦的兜底：到点还没上车就改走楼梯
         let patience = w.pax[pid].patience_s;
         if patience.is_finite() && patience > 0.0 {
+            w.pax[pid].abandon_at = w.pax[pid].t_arrive + patience;
             heap.push(Ev { at: w.pax[pid].t_arrive + patience, seq, kind: Kind::Abandon(pid) });
             seq += 1;
         }
@@ -272,6 +273,11 @@ fn in_hall(w: &World, pid: usize, level: i16) -> bool {
 /// 等得不耐烦，改走楼梯。这一位乘客从电梯厅里退场，计入另一类统计。
 fn abandon_to_stairs(w: &mut World, pid: usize, metrics: &mut Metrics) {
     if !w.pax[pid].waiting() {
+        return;
+    }
+    // 过期计时器：换腿和僵局重排都会把 abandon_at 往后推，
+    // 旧事件到点就忽略，只认当前这条腿的截止时刻
+    if w.pax[pid].patience_s.is_finite() && w.now + 1e-9 < w.pax[pid].abandon_at {
         return;
     }
     let level = w.pax[pid].from;
@@ -645,7 +651,13 @@ fn step_car<R: Router, B: Boarding>(
                 // 这层名下有活、车里还有位子、并且真的有人在等，才开门。
                 //
                 // 少这几个条件会死循环：车满着停在某层，层上那条呼叫一直灭不掉，
-                // 车就在原地反复空停靠，车上的人一辈子送不到
+                // 车就在原地反复空停靠，车上的人一辈子送不到。
+                //
+                // 位子按额定算，不按物理极限算。13 到 17 人之间时这道门不开，
+                // 层上的人只能等耐心耗尽，与红线 3 的挤梯口径不一致，这是已知取舍：
+                // 按极限开门的话，一次谁也挤不上的空停靠会把门反复撬开，
+                // 而趴下的车没有唤醒机制，只能靠新外呼叫醒。
+                // 想动这里，先给闲置有活的车补唤醒，再放宽这道门，顺序不能反
                 let has_free = w.cars[id].occupants.len() < w.cfg.cars[id].capacity_rated;
                 let someone = waiting_for(w, here, Dir::Up) || waiting_for(w, here, Dir::Down);
                 if owns_call_at(w, id, here) && has_free && someone {
@@ -1040,6 +1052,14 @@ fn board_and_alight<B: Boarding>(
             w.pax[pid].no_space_count = 0;
             heap.push(Ev { at, seq: *seq, kind: Kind::Arrive(pid) });
             *seq += 1;
+            // 第二条腿给一个完整的新耐心窗口。第一条腿遗留的旧计时器
+            // 还在堆里，它到点时按 abandon_at 认出过期，不会误赶人
+            let patience = w.pax[pid].patience_s;
+            if patience.is_finite() && patience > 0.0 {
+                w.pax[pid].abandon_at = at + patience;
+                heap.push(Ev { at: at + patience, seq: *seq, kind: Kind::Abandon(pid) });
+                *seq += 1;
+            }
         } else {
             w.pax[pid].final_exit = now;
         }
@@ -1283,8 +1303,10 @@ fn requeue_after_stall(
     // 重新进场，外呼会在那一刻重新登记
     heap.push(Ev { at: w.now, seq: *seq, kind: Kind::Arrive(pid) });
     *seq += 1;
-    // 重新给一个完整的耐心窗口，否则他会立刻触发已经过期的弃梯事件
+    // 重新给一个完整的耐心窗口，否则他会立刻触发已经过期的弃梯事件。
+    // 旧事件还躺在堆里，到点按 abandon_at 认出过期，不会误伤
     if patience.is_finite() && patience > 0.0 {
+        w.pax[pid].abandon_at = w.now + patience;
         heap.push(Ev { at: w.now + patience, seq: *seq, kind: Kind::Abandon(pid) });
         *seq += 1;
     }
@@ -1799,6 +1821,40 @@ mod tests {
         c.traffic.departure_ratio = 1.0;
         let r = default_run(c);
         assert_eq!(r.metrics.abandoned, 0, "关掉之后不该有人弃梯");
+    }
+
+    /// 过期计时器不赶人。换腿和僵局重排都会推迟 abandon_at，
+    /// 旧事件到点必须忽略，只认当前这条腿的截止时刻。
+    #[test]
+    fn stale_abandon_timer_does_not_evict() {
+        let mut w = World::new(small());
+        let pid = 0;
+        let from = w.pax[pid].from;
+        let qi = w.qidx(from);
+        // 摆一个正在等第二条腿的人：旧截止 100，新截止 1000
+        w.pax[pid].hop_idx = 1;
+        w.pax[pid].t_arrive = 500.0;
+        w.pax[pid].t_board = 0.0;
+        w.pax[pid].t_exit = 0.0;
+        w.pax[pid].to = from;
+        w.pax[pid].used_stairs = false;
+        w.pax[pid].abandoned = false;
+        w.pax[pid].patience_s = 500.0;
+        w.pax[pid].abandon_at = 1000.0;
+        if !w.hall[qi].contains(&pid) {
+            w.hall[qi].push(pid);
+        }
+        let mut metrics = Metrics::with_floors(w.n_levels);
+        // 第一条腿遗留的旧事件在 100 到点：忽略，人还在等
+        w.now = 100.0;
+        abandon_to_stairs(&mut w, pid, &mut metrics);
+        assert!(!w.pax[pid].abandoned, "旧计时器不该把返程的人赶走");
+        assert_eq!(metrics.abandoned, 0);
+        // 当前腿的截止到了：正常弃梯
+        w.now = 1000.0;
+        abandon_to_stairs(&mut w, pid, &mut metrics);
+        assert!(w.pax[pid].abandoned, "新截止到了就该弃梯");
+        assert_eq!(metrics.abandoned, 1);
     }
 
     /// 红线 2：上下都按时，多出来的那条呼叫最终变成一次幽灵停站。

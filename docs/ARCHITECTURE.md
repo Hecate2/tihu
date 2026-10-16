@@ -78,7 +78,7 @@ enum Kind {
 }
 ```
 
-`Arrive` 带的是乘客下标，不是楼层。堆里的元素数量是「轿厢数加乘客数」，几千个量级。`BinaryHeap` 带 `with_capacity` 预分配，运行期间不再申请内存。
+`Arrive` 带的是乘客下标，不是楼层。堆里的元素数量是「轿厢数加乘客数」，几千个量级。`BinaryHeap` 带 `with_capacity` 预分配，堆本体运行期间不再增长。
 
 ### 3.2 内核决定停不停
 
@@ -137,7 +137,7 @@ Stalled  -> StallTick 循环 -> Idle
 
 ### 4.1 运行期间零分配
 
-进入主循环之前，事件堆与各容器按配置推算的上界一次性 `with_capacity`，之后不再增长：
+进入主循环之前，事件堆、视图缓冲、电梯厅、在梯名单按配置推算的上界一次性 `with_capacity`：
 
 ```
 乘客数上界 = 楼层数 × 户数 × 户均人数 × 出行率 × 1.2
@@ -145,7 +145,11 @@ Stalled  -> StallTick 循环 -> Idle
 每层电梯厅容量 = 该层住户数上界
 ```
 
-仿真进到循环里之后再也不 `malloc`。这条不仅是性能考虑，也让 profile 出来的火焰图干净，一眼能看出热点在哪。
+但「之后再也不 `malloc`」目前不成立：`assign_unowned` 的待派列表、`prune_calls`
+的死亡槽位、`plan_leg` 的预定表、`board_and_alight` 的下梯名单、
+`serving_cars_least_busy` 的候选表，每次调用都新申请一个 `Vec`。实测单跑毫秒级，
+这几处不是瓶颈，所以先把文档改诚实，优化等火焰图说了算，见
+[`PERFORMANCE.md`](PERFORMANCE.md) 第 4 节。
 
 ### 4.2 视图靠复用缓冲
 
