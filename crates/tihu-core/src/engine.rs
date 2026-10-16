@@ -548,10 +548,18 @@ impl World {
             // 带小孩的同行团，尾部那几位走小孩体重那一峰，保证相关性
             let weight = rng.body_weight(&self.cfg.weight, is_child && k + 1 < size);
             let strategy = self.cfg.strategy.pick(rng.f64(Stream::Strategy));
-            // 红线 4：低楼层有人走楼梯。这是出发前就定下的，与半路弃梯分开
+            // 红线 4：低楼层有人走楼梯。这是出发前就定下的，与半路弃梯分开。
+            // 跨度按实际行程算，方向也要分：晚高峰从大堂往上爬的人，
+            // 走的是 cost_up 那条路。用 from.abs() 会把 1 层到 9 层算成
+            // 「下 1 层 12 秒」，于是晚高峰冒出一成多爬楼的人
             let est = estimate_wait(from, &self.cfg) + estimate_ride(from, &self.cfg);
-            let use_stairs =
-                stairs.enabled && rng.chance(Stream::Demand, stairs.probability(from.abs(), est));
+            let span = (to - from).abs();
+            let walk_p = if to < from {
+                stairs.probability(span, est)
+            } else {
+                stairs.probability_up(span, est)
+            };
+            let use_stairs = stairs.enabled && rng.chance(Stream::Demand, walk_p);
             let mut hops = [Hop { from, to }, Hop { from: to, to: from }];
             let n_hops = if with_return { 2 } else { 1 };
             if !with_return {
@@ -903,6 +911,39 @@ mod tests {
             (0.02..=0.05).contains(&share),
             "全楼走楼梯比例 {share:.4} 超出 2% 到 5% 的目标区间"
         );
+    }
+
+    /// 晚高峰几乎没人爬高楼。从大堂往上爬，费力是下楼的数倍，
+    /// 跨 6 层以上的人不该出现在楼梯间。之前按「下 1 层」决策时，
+    /// 晚高峰有 11% 的人走楼梯，平均爬 9 层。
+    #[test]
+    fn evening_stairs_stay_near_zero() {
+        let mut total = 0usize;
+        let mut long = 0usize;
+        for seed in 0..20 {
+            let mut cfg = preset_cfg();
+            cfg.traffic.pattern = crate::config::Pattern::EveningUp;
+            cfg.traffic.departure_ratio = 1.0;
+            cfg.sim.seed = seed;
+            let w = World::new(cfg);
+            total += w.pax.len();
+            long += w
+                .pax
+                .iter()
+                .filter(|p| p.used_stairs && (p.to - p.from).abs() > 6)
+                .count();
+        }
+        assert_eq!(long, 0, "晚高峰爬 6 层以上的人应当是零，实际 {long} / {total}");
+    }
+
+    /// 同样的跨度，往上爬的意愿远低于往下走。
+    #[test]
+    fn climbing_up_is_less_likely_than_going_down() {
+        let s = crate::config::Stairs::default();
+        // 下 1 层 12 秒 vs 爬 8 层 101 秒，前者两成走，后者几乎没人走
+        assert!(s.probability(1, 60.0) > 0.1);
+        assert!(s.probability_up(8, 60.0) < 0.05);
+        assert!(s.probability_up(8, 60.0) < s.probability(8, 60.0));
     }
 
     /// 红线 4：走楼梯的人集中在低层。

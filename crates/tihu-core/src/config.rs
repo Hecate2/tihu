@@ -600,12 +600,22 @@ impl Stairs {
     }
 
     /// 完整的走楼梯概率。意愿与「电梯比楼梯快不了多少」这个事实相乘。
+    /// 下楼方向，见 MODEL 7.1。
     pub fn probability(&self, floors: i16, elevator_estimate: f64) -> f64 {
+        self.probability_with(floors, elevator_estimate, self.cost_down(floors))
+    }
+
+    /// 上楼方向的走楼梯概率。往上爬的费力乘数高得多，见 MODEL 7.3。
+    /// 晚高峰从大堂回家必须走这一条，用 cost_down 会把爬 9 层算成下 1 层。
+    pub fn probability_up(&self, floors: i16, elevator_estimate: f64) -> f64 {
+        self.probability_with(floors, elevator_estimate, self.cost_up(floors))
+    }
+
+    fn probability_with(&self, floors: i16, elevator_estimate: f64, stair: f64) -> f64 {
         let willing = self.willingness(floors);
         if willing <= 0.0 {
             return 0.0;
         }
-        let stair = self.cost_down(floors);
         let z = (elevator_estimate - stair) / self.tau_s.max(1e-6);
         let worth_it = 1.0 / (1.0 + (-z).exp());
         (willing * worth_it).clamp(0.0, 1.0)
