@@ -13,7 +13,7 @@
 
 use serde::Serialize;
 use tihu_core::batch::{self, NumAvg, SeedBatch};
-use tihu_core::builtin::{CollectiveScan, DownPeakSweep, LoadAwareEta, SelectiveCollective};
+use tihu_core::builtin::{CollectiveScan, DownPeakSweep, LoadAwareEta};
 use tihu_core::config::{Config, Severity, LOBBY};
 use tihu_core::metrics::{Metrics, Summary};
 use tihu_core::sim::{self, Run};
@@ -488,14 +488,20 @@ pub fn speed_tiers_json() -> String {
 }
 
 /// 按名字挑一套算法跑一次。
+///
+/// 上下客规则与满载直驶阈值都按配置走，不用写死的默认值，
+/// 否则网页上根本没有旋钮能拧动拒挤曲线。
 fn dispatch(cfg: Config, router: &str) -> Run {
-    let b = tihu_core::builtin::DefaultBoarding::default();
+    let b = tihu_core::builtin::DefaultBoarding { cfg: cfg.boarding.clone() };
+    let selective = tihu_core::builtin::SelectiveCollective {
+        bypass_ratio: cfg.boarding.bypass_load_ratio,
+    };
     match router {
         "collective_scan" => {
             sim::run(cfg, &mut CollectiveScan, &mut LoadAwareEta::default(), &b)
         }
         "selective_collective" => {
-            sim::run(cfg, &mut SelectiveCollective::default(), &mut LoadAwareEta::default(), &b)
+            sim::run(cfg, &mut selective.clone(), &mut LoadAwareEta::default(), &b)
         }
         _ => sim::run(cfg, &mut DownPeakSweep, &mut LoadAwareEta::default(), &b),
     }
@@ -506,13 +512,16 @@ fn dispatch(cfg: Config, router: &str) -> Run {
 /// 与 `dispatch` 用同一组算法对象，区别只在循环在哪儿。聚合口径见
 /// [`tihu_core::batch`]。
 fn dispatch_batch(cfg: Config, router: &str) -> SeedBatch {
-    let b = tihu_core::builtin::DefaultBoarding::default();
+    let b = tihu_core::builtin::DefaultBoarding { cfg: cfg.boarding.clone() };
+    let selective = tihu_core::builtin::SelectiveCollective {
+        bypass_ratio: cfg.boarding.bypass_load_ratio,
+    };
     match router {
         "collective_scan" => {
             batch::run_seeds(&cfg, &mut CollectiveScan, &mut LoadAwareEta::default(), &b)
         }
         "selective_collective" => {
-            batch::run_seeds(&cfg, &mut SelectiveCollective::default(), &mut LoadAwareEta::default(), &b)
+            batch::run_seeds(&cfg, &mut selective.clone(), &mut LoadAwareEta::default(), &b)
         }
         _ => batch::run_seeds(&cfg, &mut DownPeakSweep, &mut LoadAwareEta::default(), &b),
     }

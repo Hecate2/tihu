@@ -10,7 +10,7 @@
 //! 都不会「路过该停的层」，也不会「停在没活可干的层」。
 
 use crate::builtin::{DefaultBoarding, DownPeakSweep};
-use crate::config::{CallSurface, Config, Strategy};
+use crate::config::{Boarding as BoardCfg, CallSurface, Config, Strategy};
 use crate::engine::{Call, CarPhase, Scratch, World};
 use crate::metrics::Metrics;
 use crate::motion::{decel_distance, state_at, time_at_distance, Dir};
@@ -1112,8 +1112,10 @@ fn try_board_one<B: Boarding>(
         }
         Verdict::Admit => {
             // 中间地带要掷骰子。策略对象本身不掷，随机性归内核。
-            // 这一步是红线 3 的核心：越接近满载，越可能有人放弃
-            let prob = default_accept_prob(&sample, tol);
+            // 这一步是红线 3 的核心：越接近满载，越可能有人放弃。
+            // 概率按配置里的拒挤曲线算，不能用写死的默认值，
+            // 否则调参的人拧哪个旋钮都没反应
+            let prob = default_accept_prob(&w.cfg.boarding, &sample, tol);
             if prob < 1.0 && !rng.chance(Stream::Squeeze, prob) {
                 w.pax[pid].declined_count += 1;
                 w.pax[pid].bypass_count += 1;
@@ -1149,11 +1151,12 @@ fn try_board_one<B: Boarding>(
 }
 
 /// `DefaultBoarding` 的概率公式。放在这里是因为随机性归内核，策略对象本身不掷骰子。
-fn default_accept_prob(s: &AdmitSample, tol: f64) -> f64 {
+/// 曲线按配置走，调用方把 `w.cfg.boarding` 传进来。
+fn default_accept_prob(cfg: &BoardCfg, s: &AdmitSample, tol: f64) -> f64 {
     if s.free_slots == 0 {
         return 0.0;
     }
-    crate::config::Boarding::default().accept_prob(s.load_ratio, tol, s.waited_s)
+    cfg.accept_prob(s.load_ratio, tol, s.waited_s)
 }
 
 /// 一次僵持的结果。
@@ -1322,7 +1325,8 @@ fn collect(w: &World, stalls: usize, stall_seconds: f64, mut m: Metrics) -> Metr
 pub fn default_run(cfg: Config) -> Run {
     let mut router = DownPeakSweep;
     let mut assigner = crate::builtin::LoadAwareEta::default();
-    let boarding = DefaultBoarding::default();
+    // 上下客规则按配置走，不能用写死的默认值，否则调参拧不动拒挤曲线
+    let boarding = DefaultBoarding { cfg: cfg.boarding.clone() };
     run(cfg, &mut router, &mut assigner, &boarding)
 }
 
@@ -1745,6 +1749,44 @@ mod tests {
         assert!(served_with_bypass > 0, "被跳过的人最终也该被送走");
     }
 
+    /// 拒挤曲线的四个软参数必须进决策。同一份种子下拧旋钮，
+    /// declined 与 no_space 的次数要跟着动。之前骰子处写死默认值，
+    /// 四组参数跑出逐位相同的结果，调参等于没调。
+    #[test]
+    fn boarding_soft_params_change_outcomes() {
+        fn counts(soft: f64, gamma: f64) -> (u32, u32) {
+            let mut c = Config::default();
+            c.building.top_level = 18;
+            c.building.units_per_floor = vec![4; 18];
+            c.cars = vec![CarSpec::default()];
+            c.traffic.departure_ratio = 1.0;
+            c.stairs.abandon_after_s = 0.0;
+            c.boarding.soft_start_ratio = soft;
+            c.boarding.gamma = gamma;
+            let r = default_run(c);
+            let declined = r.world.pax.iter().map(|p| p.declined_count).sum();
+            let no_space = r.world.pax.iter().map(|p| p.no_space_count).sum();
+            (declined, no_space)
+        }
+        // 门槛压到 0：人人掷骰子，declined 应当最多
+        let loose = counts(0.0, 1.0);
+        // 门槛拉到 1：谁都不掷骰子，declined 应当归零
+        let strict = counts(1.0, 1.0);
+        assert!(
+            loose.0 > strict.0,
+            "soft_start 0 与 1 的 declined 应当不同，实际 {loose:?} 对 {strict:?}"
+        );
+        // 曲线形状变化：拒绝次数要跟着动（方向不硬断言，
+        // 下游抽签序列会发散，只断言敏感不断言单调）
+        let steep = counts(0.5, 8.0);
+        let flat = counts(0.5, 1.0);
+        assert_ne!(
+            steep.0, flat.0,
+            "gamma 1 与 8 的 declined 应当不同，实际都是 {}",
+            steep.0
+        );
+    }
+
     /// 红线 6：候梯人数远超运载能力时，超载死锁必须能被触发。
     #[test]
     fn overload_stall_can_be_triggered() {
@@ -1913,7 +1955,8 @@ mod tests {
         );
 
         let mut rng = Streams::new(7);
-        let boarding = DefaultBoarding::default();
+        // 按这个世界自己的配置构造判据，不用写死的默认值
+        let boarding = DefaultBoarding { cfg: w.cfg.boarding.clone() };
         let ok = try_board_one(&mut w, 0, from, pid, Dir::None, &boarding, 0.0, &mut rng);
         assert!(!ok, "载重到顶就不该再放人进来");
         assert_eq!(w.pax[pid].no_space_count, 1, "这是装不下，不是不愿意挤");
