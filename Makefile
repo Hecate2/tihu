@@ -17,7 +17,7 @@ wasm:
 ## 给静态托管用的平铺版。把 dist/ 整个目录扔到任何静态服务器上就能跑
 dist: wasm
 	mkdir -p dist
-	cp web/index.html web/app.js web/charts.js web/styles.css web/tihu.wasm dist/
+	cp web/index.html web/app.js web/charts.js web/merge.js web/worker.js web/styles.css web/tihu.wasm dist/
 
 ## 单文件版。断网双击即开，见 AGENTS.md 第 7 节那条红线
 single: wasm

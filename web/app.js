@@ -18,6 +18,7 @@ function escHtml(s) {
 // ---------------------------------------------------------------------------
 
 let ex = null; // WASM 的导出表
+let wasmBytes = null; // WASM 产物字节。主线程自用一份，开工人时再各克隆一份发过去
 
 function b64ToBytes(b64) {
   const bin = atob(b64);
@@ -37,6 +38,7 @@ async function loadWasm() {
     bytes = new Uint8Array(await res.arrayBuffer());
   }
   const { instance } = await WebAssembly.instantiate(bytes, {});
+  wasmBytes = bytes;
   return instance.exports;
 }
 
@@ -329,37 +331,161 @@ function fromHash(h) {
 }
 
 // ---------------------------------------------------------------------------
+// 并行池。种子数多了就把范围切成几段，每个 Worker 各算一段，主线程合并。
+// 合并函数在 merge.js，口径对照内核 batch.rs。工人源码在 worker.js。
+// ---------------------------------------------------------------------------
+
+// 64 个种子起用工人。node 实测单种子约 2.5 毫秒，64 个约 160 毫秒，
+// 工人那次实例化加产物复制刚好与之打平，再少就亏了。
+const PARALLEL_MIN_RUNS = 64;
+// 8 个工人封顶，每段至少 8 个种子，摊掉一次调用的 JSON 开销。
+const PARALLEL_MAX_WORKERS = 8;
+const PARALLEL_MIN_CHUNK = 8;
+
+// 工人源码。单文件版由 embed.js 内嵌在 #tihu-worker-src 里，
+// 静态服务器下按 worker.js 文件名拿。都拿不到就回退同步。
+async function workerSource() {
+  const el = document.getElementById("tihu-worker-src");
+  if (el && el.textContent.trim()) return el.textContent;
+  const res = await fetch("worker.js");
+  if (!res.ok) throw new Error("拿不到 worker.js，状态码 " + res.status);
+  return await res.text();
+}
+
+// 把 [from, to] 闭区间切成 n 段，尽量均分。
+function splitRange(from, to, n) {
+  const out = [];
+  let cur = from;
+  for (let i = 0; i < n; i++) {
+    const len = Math.ceil((to - cur + 1) / (n - i));
+    out.push([cur, cur + len - 1]);
+    cur += len;
+  }
+  return out;
+}
+
+// 并行跑完一段种子再合并。正常交 { sim }，中途被新任务顶掉交
+// { cancelled: true }，工人起不来或算错了就抛错，调用方回退同步。
+async function runParallel(cfg, routerId, token, onProgress) {
+  const from = cfg.sim.seed, to = cfg.sim.seed_to;
+  const total = to - from + 1;
+  const parallelism = Math.min(PARALLEL_MAX_WORKERS, navigator.hardwareConcurrency || 4);
+  const n = Math.max(1, Math.min(parallelism, Math.floor(total / PARALLEL_MIN_CHUNK)));
+  if (n <= 1 || typeof Worker === "undefined" || !wasmBytes) {
+    throw new Error("并行条件不够，回退同步");
+  }
+  const src = await workerSource();
+  if (token !== runToken) return { cancelled: true };
+  const url = URL.createObjectURL(new Blob([src], { type: "text/javascript" }));
+  const workers = [];
+  try {
+    const ranges = splitRange(from, to, n);
+    for (let i = 0; i < n; i++) workers.push(new Worker(url));
+    // 任一工人就绪失败就整体回退，不留半个池子
+    await Promise.all(workers.map((w) => new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error("工人就绪超时")), 10000);
+      w.onmessage = (e) => {
+        if (e.data && e.data.type === "ready") { clearTimeout(timer); resolve(); }
+        else if (e.data && e.data.type === "failed") { clearTimeout(timer); reject(new Error(e.data.message)); }
+      };
+      w.onerror = () => { clearTimeout(timer); reject(new Error("工人报错，多半是当前环境建不起 Worker")); };
+      w.postMessage({ type: "init", wasmBytes });
+    })));
+    if (token !== runToken) return { cancelled: true };
+    const partials = new Array(n);
+    let done = 0;
+    await Promise.all(workers.map((w, i) => new Promise((resolve, reject) => {
+      const [a, b] = ranges[i];
+      const job = Object.assign(clone(cfg), { sim: Object.assign({}, cfg.sim, { seed: a, seed_to: b }) });
+      w.onmessage = (e) => {
+        const m = e.data || {};
+        if (m.type === "result") {
+          if (!m.res.ok) { reject(new Error((m.res.issues[0] || {}).message || "分片没跑起来")); return; }
+          partials[i] = m.res.sim;
+          done += b - a + 1;
+          onProgress(done, total);
+          resolve();
+        } else if (m.type === "error") {
+          reject(new Error(m.message));
+        }
+      };
+      w.onerror = () => reject(new Error("工人报错，多半是当前环境建不起 Worker"));
+      w.postMessage({ type: "run", job: i, cfgJson: JSON.stringify(job), routerId });
+    })));
+    if (token !== runToken) return { cancelled: true };
+    return { sim: mergeReports(partials) };
+  } finally {
+    for (const w of workers) { try { w.terminate(); } catch { /* 终止失败不用管 */ } }
+    URL.revokeObjectURL(url);
+  }
+}
+
+// ---------------------------------------------------------------------------
 // 出结果
 // ---------------------------------------------------------------------------
 
 let runToken = 0;
 let lastRouterId = 0;
 
+// 同步跑一次。批量与单次都只调一次内核，聚合在内核侧完成。
+// 正常交 { sim }，配置不合法交 { issues }，内核抛错就往上抛。
+function syncRun(cfg, routerId) {
+  const res = kernel.run(cfg, routerId);
+  if (!res.ok) return { issues: res.issues };
+  return { sim: res.sim, issues: res.issues };
+}
+
 async function run() {
   const token = ++runToken;
   const cfg = applyUi(clone(base));
   lastRouterId = Number(ui.router.value);
 
-  // 批量与单次都只调一次内核，聚合在内核侧完成。这里只按种子范围估个次数，
-  // 用来先画一句提示，真正跑几个种子由内核说了算。
+  // 这里只按种子范围估个次数，用来先画一句提示，真正跑几个种子由内核说了算。
   const runs = cfg.sim.seed_to ? cfg.sim.seed_to - cfg.sim.seed + 1 : 1;
-  setNote(runs > 1 ? "正在跑 " + runs + " 个种子…" : "");
+  const parallel = runs >= PARALLEL_MIN_RUNS;
+  setNote(runs > 1 ? (parallel ? "正在并行跑 " + runs + " 个种子…" : "正在跑 " + runs + " 个种子…") : "");
   if (runs > 1) {
     // 先把这句话画到页面上，再开始算，不然页面会一直停在上一张图。
     await new Promise((r) => setTimeout(r, 0));
     if (token !== runToken) return;
   }
 
+  const fail = (issues) => { setNote(""); showIssues(issues); };
   let sim;
-  try {
-    const res = kernel.run(cfg, lastRouterId);
-    if (!res.ok) { setNote(""); showIssues(res.issues); return; }
-    showIssues(res.issues);
-    sim = res.sim;
-  } catch (e) {
-    setNote("");
-    showIssues([{ severity: "error", message: "仿真没能跑起来：" + e.message }]);
-    return;
+  if (parallel) {
+    try {
+      const r = await runParallel(cfg, lastRouterId, token, (done, total) => {
+        if (token === runToken) setNote("正在并行跑 " + done + " / " + total + " 个种子…");
+      });
+      if (token !== runToken || r.cancelled) return;
+      sim = r.sim;
+      showIssues([]);
+    } catch (e) {
+      // 工人起不来就回退同步，保证旧环境照样出数
+      if (token !== runToken) return;
+      setNote("并行没跑起来，改同步重跑…");
+      await new Promise((r) => setTimeout(r, 0));
+      if (token !== runToken) return;
+      try {
+        const fb = syncRun(cfg, lastRouterId);
+        if (!fb.sim) { fail(fb.issues); return; }
+        showIssues(fb.issues);
+        sim = fb.sim;
+      } catch (e2) {
+        fail([{ severity: "error", message: "仿真没能跑起来：" + e2.message }]);
+        return;
+      }
+    }
+  } else {
+    try {
+      const fb = syncRun(cfg, lastRouterId);
+      if (!fb.sim) { fail(fb.issues); return; }
+      showIssues(fb.issues);
+      sim = fb.sim;
+    } catch (e) {
+      fail([{ severity: "error", message: "仿真没能跑起来：" + e.message }]);
+      return;
+    }
   }
   if (token !== runToken) return;
   render(sim);

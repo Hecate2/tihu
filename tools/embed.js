@@ -18,15 +18,24 @@ const read = (p) => fs.readFileSync(p, "utf8");
 let html = read(path.join(webDir, "index.html"));
 const css = read(path.join(webDir, "styles.css"));
 const charts = read(path.join(webDir, "charts.js"));
+const merge = read(path.join(webDir, "merge.js"));
+const worker = read(path.join(webDir, "worker.js"));
 const app = read(path.join(webDir, "app.js"));
 const wasm = fs.readFileSync(path.join(webDir, "tihu.wasm")).toString("base64");
+
+if (worker.includes("</scr" + "ipt")) {
+  console.error("embed 失败：worker.js 里出现了脚本结束标记，内嵌会被截断");
+  process.exit(1);
+}
 
 const swaps = [
   ['<link rel="stylesheet" href="styles.css">', `<style>\n${css}\n</style>`],
   ['<script src="charts.js"></script>', `<script>\n${charts}\n</script>`],
+  ['<script src="merge.js"></script>', `<script>\n${merge}\n</script>`],
+  // 工人源码以纯文本内嵌，app.js 取出来再以 Blob 启动，file:// 下不断网可用
   [
     '<script src="app.js"></script>',
-    `<script>window.TIHU_WASM_BASE64 = "${wasm}";</script>\n<script>\n${app}\n</script>`,
+    `<script id="tihu-worker-src" type="text/plain">\n${worker}\n</script>\n<script>window.TIHU_WASM_BASE64 = "${wasm}";</script>\n<script>\n${app}\n</script>`,
   ],
 ];
 
@@ -38,7 +47,7 @@ for (const [from, to] of swaps) {
   html = html.replace(from, () => to);
 }
 
-if (html.includes('src="app.js"') || html.includes('href="styles.css"')) {
+if (html.includes('src="app.js"') || html.includes('src="merge.js"') || html.includes('href="styles.css"')) {
   console.error("embed 失败：还有没内联进去的外部引用");
   process.exit(1);
 }
