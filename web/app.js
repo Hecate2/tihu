@@ -262,10 +262,7 @@ function loadIntoUi(cfg) {
   ui.overload.checked = !!cfg.overload.enabled;
   ui.pressb.value = cfg.strategy.press_both || 0;
 
-  ui.seed.value = cfg.sim.seed;
-  ui.seed_count.value = cfg.sim.seed_to && cfg.sim.seed_to > cfg.sim.seed
-    ? cfg.sim.seed_to - cfg.sim.seed + 1
-    : 1;
+  // 种子不归预设管，用户填的留着。预设切来切去不该把个数打回 1。
   syncLabels();
 }
 
