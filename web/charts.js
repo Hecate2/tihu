@@ -25,23 +25,33 @@ function heat(t) {
 }
 
 /**
+ * 水平条形图共用的画框：尺寸、参考线与标题。
+ * barChartH 与 barChartRange 只差每一行的画法，框是同一套。
+ */
+function hFrame(o, nRows, max) {
+  const w = o.labelW + o.barW + 52;
+  const h = nRows * o.rowH + 22;
+  let s = `<svg width="${w}" height="${h}" viewBox="0 0 ${w} ${h}" role="img">`;
+
+  // 四条竖向参考线，让不同图之间能对比
+  for (const f of [0.25, 0.5, 0.75, 1]) {
+    const gx = o.labelW + f * o.barW;
+    s += `<line x1="${gx}" y1="16" x2="${gx}" y2="${h - 6}" stroke="#2a323e" stroke-width="1" stroke-dasharray="${f === 1 ? "0" : "3 3"}"/>`;
+  }
+  s += `<text x="0" y="10" fill="#97a3b4" font-size="10">平均等待，秒</text>`;
+  s += `<text x="${o.labelW + o.barW}" y="10" fill="#97a3b4" font-size="10" text-anchor="end">${max.toFixed(0)}</text>`;
+  return { h, head: s };
+}
+
+/**
  * 水平条形图，用来画「每一层等多久」。
  * rows: [{ label, value }]，value 为 null 时画成空。
  */
 function barChartH(rows, opts) {
   const o = Object.assign({ rowH: 19, barW: 240, labelW: 46, unit: "s", digits: 1, max: null }, opts);
   const max = o.max || Math.max(1e-6, ...rows.map((r) => r.value || 0));
-  const w = o.labelW + o.barW + 52;
-  const h = rows.length * o.rowH + 22;
-  let s = `<svg width="${w}" height="${h}" viewBox="0 0 ${w} ${h}" role="img">`;
-
-  // 三条竖向参考线，让不同图之间能对比
-  for (const f of [0.25, 0.5, 0.75, 1]) {
-    const x = o.labelW + f * o.barW;
-    s += `<line x1="${x}" y1="16" x2="${x}" y2="${h - 6}" stroke="#2a323e" stroke-width="1" stroke-dasharray="${f === 1 ? "0" : "3 3"}"/>`;
-  }
-  s += `<text x="0" y="10" fill="#97a3b4" font-size="10">平均等待，秒</text>`;
-  s += `<text x="${o.labelW + o.barW}" y="10" fill="#97a3b4" font-size="10" text-anchor="end">${max.toFixed(0)}</text>`;
+  const { h, head } = hFrame(o, rows.length, max);
+  let s = head;
 
   rows.forEach((r, i) => {
     const y = 18 + i * o.rowH;
@@ -66,17 +76,9 @@ function barChartH(rows, opts) {
 function barChartRange(rows, opts) {
   const o = Object.assign({ rowH: 19, barW: 240, labelW: 46, digits: 1, max: null }, opts);
   const max = o.max || Math.max(1e-6, ...rows.map((r) => r.worst || 0));
-  const w = o.labelW + o.barW + 52;
-  const h = rows.length * o.rowH + 22;
+  const { head } = hFrame(o, rows.length, max);
   const x = (v) => o.labelW + Math.max(0, Math.min(1, v / max)) * o.barW;
-  let s = `<svg width="${w}" height="${h}" viewBox="0 0 ${w} ${h}" role="img">`;
-
-  for (const f of [0.25, 0.5, 0.75, 1]) {
-    const gx = o.labelW + f * o.barW;
-    s += `<line x1="${gx}" y1="16" x2="${gx}" y2="${h - 6}" stroke="#2a323e" stroke-width="1" stroke-dasharray="${f === 1 ? "0" : "3 3"}"/>`;
-  }
-  s += `<text x="0" y="10" fill="#97a3b4" font-size="10">平均等待，秒</text>`;
-  s += `<text x="${o.labelW + o.barW}" y="10" fill="#97a3b4" font-size="10" text-anchor="end">${max.toFixed(0)}</text>`;
+  let s = head;
 
   rows.forEach((r, i) => {
     const y = 18 + i * o.rowH;

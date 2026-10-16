@@ -7,6 +7,12 @@
 
 "use strict";
 
+// HTML 转义。charts.js 里有一份同名同实现的 esc，但两个文件没有模块关系，
+// 这里用自己的名字，免得隐式依赖对方的加载顺序。
+function escHtml(s) {
+  return String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+}
+
 // ---------------------------------------------------------------------------
 // WASM 的加载与调用
 // ---------------------------------------------------------------------------
@@ -76,11 +82,13 @@ const kernel = {
 // 一致，两边不会有第二份表。
 let SPEED_TIERS = [];
 function profileFor(v) {
-  let best = SPEED_TIERS[0] || { a: 0.8, j: 1.0 };
+  // 取最接近的那一档，与内核 motion::MotionProfile::for_speed 同一条规则。
+  // 档位表为空时退回住宅常见值，不让解构拿到 undefined。
+  let best = null;
   for (const t of SPEED_TIERS) {
-    if (Math.abs(t.v - v) < Math.abs(best.v - v)) best = t;
+    if (!best || Math.abs(t.v - v) < Math.abs(best.v - v)) best = t;
   }
-  return [best.a, best.j];
+  return best ? [best.a, best.j] : [0.8, 1.0];
 }
 
 const ui = {};
@@ -376,8 +384,8 @@ function showIssues(issues) {
   }
   box.hidden = false;
   box.innerHTML = errs
-    .map((i) => `<li>${esc(i.message)}</li>`)
-    .concat(warns.map((i) => `<li class="warn">${esc(i.message)}</li>`))
+    .map((i) => `<li>${escHtml(i.message)}</li>`)
+    .concat(warns.map((i) => `<li class="warn">${escHtml(i.message)}</li>`))
     .join("");
 }
 
@@ -445,7 +453,7 @@ function render(s) {
     ["被僵局请下车", s.pax_after_stall + " 人"],
   ];
   document.getElementById("balance").innerHTML = rows2
-    .map((r) => `<tr><td>${esc(r[0])}</td><td>${esc(r[1])}</td></tr>`)
+    .map((r) => `<tr><td>${escHtml(r[0])}</td><td>${escHtml(r[1])}</td></tr>`)
     .join("");
 
   setNote(runs > 1
@@ -474,14 +482,14 @@ async function main() {
 
   const presets = kernel.config(1);
   ui.preset.innerHTML = ['<option value="">自定义</option>']
-    .concat(presets.map((p) => `<option value="${esc(p.name)}">${esc(p.label)}</option>`))
+    .concat(presets.map((p) => `<option value="${escHtml(p.name)}">${escHtml(p.label)}</option>`))
     .join("");
   const routers = kernel.config(2);
   ui.router.innerHTML = routers
-    .map((r, i) => `<option value="${i}">${esc(r.label)}</option>`)
+    .map((r, i) => `<option value="${i}">${escHtml(r.label)}</option>`)
     .join("");
   document.getElementById("router_list").innerHTML = routers
-    .map((r) => `<li><b>${esc(r.label)}</b><span>${esc(r.desc)}</span></li>`)
+    .map((r) => `<li><b>${escHtml(r.label)}</b><span>${escHtml(r.desc)}</span></li>`)
     .join("");
 
   // 常用速度档位由内核给出，网页这边只负责摆进输入框的建议列表。
