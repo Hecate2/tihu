@@ -42,7 +42,10 @@ impl crate::policy::Router for CollectiveScan {
                     match down {
                         Some(t) if t < v.level() => Leg::Down(t),
                         Some(t) => Leg::Up(t),
-                        None => Leg::Park,
+                        // 身后也没点名，但名下还有活（比如上行呼叫全在身后）：
+                        // 就近开过去取。原地趴着的话这批人永远等不到车，
+                        // 派梯去重后不会再有第二次指派，内核也不会叫醒它
+                        None => fetch_nearest(v),
                     }
                 }
             }
@@ -55,11 +58,33 @@ impl crate::policy::Router for CollectiveScan {
                     match up {
                         Some(t) if t > v.level() => Leg::Up(t),
                         Some(t) => Leg::Down(t),
-                        None => Leg::Park,
+                        // 同上。早高峰空车停在主入口层、名下全是楼上下行呼叫，
+                        // 走的就是这一支：上去取，下来再扫
+                        None => fetch_nearest(v),
                     }
                 }
             }
         }
+    }
+}
+
+/// 名下还有活但方向逻辑没点名时，就近取一单，取到再说。
+/// 两边都有就取近的一边。真的没活才回 Park。
+fn fetch_nearest(v: &RunView<'_>) -> Leg {
+    let here = v.level();
+    let down = v.lowest_pending().filter(|&t| t < here);
+    let up = v.highest_pending().filter(|&t| t > here);
+    match (down, up) {
+        (Some(d), Some(u)) => {
+            if here - d <= u - here {
+                Leg::Down(d)
+            } else {
+                Leg::Up(u)
+            }
+        }
+        (Some(d), None) => Leg::Down(d),
+        (None, Some(u)) => Leg::Up(u),
+        (None, None) => Leg::Park,
     }
 }
 
@@ -472,6 +497,37 @@ mod tests {
         let v = rv(8.0, Dir::Up, vec![], vec![8, 20], 2);
         // 当前位置就是 8，最近的内选是 8，回到 8 没有意义，取下一个
         assert_eq!(CollectiveScan.next_leg(&v), Leg::Up(20));
+    }
+
+    /// 空车停在主入口层、名下全是楼上的下行呼叫：上去取，不能趴着。
+    ///
+    /// 早高峰分区梯的死锁就卡在这里。原来这一支回 Park，而派梯去重后
+    /// 不会有第二次指派，内核也不会叫醒名下有活的闲车，于是整栋楼零送达。
+    #[test]
+    fn collective_scan_fetches_down_calls_above() {
+        let v = rv(1.0, Dir::None, vec![call(28, Dir::Down)], vec![], 0);
+        assert_eq!(CollectiveScan.next_leg(&v), Leg::Up(28));
+    }
+
+    /// 镜像：空车在楼上、名下只有身后的上行呼叫：下去取，不能趴着。
+    #[test]
+    fn collective_scan_fetches_up_calls_below() {
+        let v = rv(30.0, Dir::None, vec![call(5, Dir::Up)], vec![], 0);
+        assert_eq!(CollectiveScan.next_leg(&v), Leg::Down(5));
+    }
+
+    /// 身前身后只有一边有活：掉头去取，而不是趴着。真的没活才趴。
+    #[test]
+    fn collective_scan_fetches_rather_than_parks() {
+        // 上行呼叫全在身后：下去取
+        let v = rv(20.0, Dir::Up, vec![call(2, Dir::Up)], vec![], 0);
+        assert_eq!(CollectiveScan.next_leg(&v), Leg::Down(2));
+        // 下行呼叫全在身前：上去取
+        let v = rv(20.0, Dir::Down, vec![call(40, Dir::Down)], vec![], 0);
+        assert_eq!(CollectiveScan.next_leg(&v), Leg::Up(40));
+        // 真的没活才趴
+        let v = rv(5.0, Dir::None, vec![], vec![], 0);
+        assert_eq!(CollectiveScan.next_leg(&v), Leg::Park);
     }
 
     /// 满载直驶时算法只按内选走，不再绕去外呼层。
