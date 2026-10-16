@@ -888,7 +888,10 @@ fn begin_stop<B: Boarding>(
     let doors = w.cfg.cars[id].doors;
     let base = (doors.open_s - doors.early_open_credit_s).max(0.0) as f64;
     let in_t = doors.transfer_time(w.cars[id].last_boarded, w.cars[id].last_alighted);
-    let total = base + in_t + doors.close_s as f64 + doors.ctrl_resp_s as f64;
+    // 保持开启每次停靠都付，与上下客时间相加，见 MODEL 3.6 的公式。
+    // 少了这 1.5 秒，空停一次只有 4.5 秒，而估计函数按 6.0 算，
+    // 乘客脑子里的信念和实际收费就对不上了
+    let total = base + doors.dwell_s as f64 + in_t + doors.close_s as f64 + doors.ctrl_resp_s as f64;
     let close_at = w.cars[id].stop_started + total;
 
     // 幽灵停站：开门了却没人上、也没人下，白损失一次停靠开销
@@ -1514,6 +1517,42 @@ mod tests {
         plan_for_moving(&mut w, 0, 8, Dir::Up);
         assert_eq!(w.cars[0].overshoots, before);
         assert!(w.cars[0].stops_planned.contains(&(8, Dir::Up)));
+    }
+
+    /// 空停一次 6.0 秒：开门 1.5 ＋保持 1.5 ＋关门 2.8 ＋响应 0.2。
+    /// 保持开启漏掉就只有 4.5 秒，而估计函数按 6.0 算，两边对不上。
+    #[test]
+    fn empty_stop_costs_six_seconds() {
+        let mut w = World::new(small());
+        w.cars[0].level = 2.0;
+        w.now = 100.0;
+        let mut heap = std::collections::BinaryHeap::<Ev>::new();
+        let mut seq = 0u64;
+        let mut metrics = Metrics::with_floors(w.n_levels);
+        let mut rng = Streams::new(7);
+        let boarding = DefaultBoarding::default();
+        begin_stop(&mut w, 0, &boarding, &mut rng, &mut heap, &mut seq, &mut metrics);
+        let cost = w.cars[0].next_event - 100.0;
+        assert!((cost - 6.0).abs() < 1e-6, "空停应为 6.0 秒，实际 {cost}");
+    }
+
+    /// 有人上下时按人头加时间：下 1 人加 0.8 秒，一共 6.8 秒。
+    #[test]
+    fn loaded_stop_adds_transfer_time() {
+        let mut w = World::new(small());
+        w.cars[0].level = 2.0;
+        w.now = 100.0;
+        let pid = 0;
+        w.pax[pid].to = 2;
+        w.cars[0].occupants.push(pid);
+        let mut heap = std::collections::BinaryHeap::<Ev>::new();
+        let mut seq = 0u64;
+        let mut metrics = Metrics::with_floors(w.n_levels);
+        let mut rng = Streams::new(7);
+        let boarding = DefaultBoarding::default();
+        begin_stop(&mut w, 0, &boarding, &mut rng, &mut heap, &mut seq, &mut metrics);
+        let cost = w.cars[0].next_event - 100.0;
+        assert!((cost - 6.8).abs() < 1e-6, "下 1 人应为 6.8 秒，实际 {cost}");
     }
 
     /// 停靠语义：内核只按「有人要下」和「预定了要接人」两条决定停靠。
