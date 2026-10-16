@@ -174,11 +174,13 @@ function applyUi(cfg) {
 
   cfg.stairs.enabled = ui.stairs.checked;
   cfg.overload.enabled = ui.overload.checked;
+  // 滑块只管乱按里「上下都按」这一项。预设带进来的只按上行、同时呼叫多台
+  // 要原样留着，不然 stress_gaming 那 5% 只按上行会被静默归零。
   const pb = num(ui.pressb);
-  cfg.strategy.honest = 1 - pb;
-  cfg.strategy.press_both = pb;
-  cfg.strategy.press_up_only = 0;
-  cfg.strategy.multi_call = 0;
+  const other = Math.max(0, (cfg.strategy.press_up_only || 0) + (cfg.strategy.multi_call || 0));
+  const pbKept = Math.min(pb, Math.max(0, 1 - other));
+  cfg.strategy.press_both = pbKept;
+  cfg.strategy.honest = Math.max(0, 1 - pbKept - other);
 
   // 随机种子与种子范围的结束值。结束值大于起始值就走批量，内核把中间每个
   // 种子都跑一遍再汇总。填一样、填更小，或者留空，都当单次跑。
