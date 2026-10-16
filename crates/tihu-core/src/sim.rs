@@ -141,8 +141,23 @@ pub fn run<R: Router, A: Assigner, B: Boarding>(
                 }
                 let qi = w.qidx(level);
                 w.hall[qi].push(pid);
-                register_calls(&mut w, level, &[pid]);
+                let pre_owned = register_calls(&mut w, level, &[pid]);
                 assign_unowned(&mut w, assigner, &mut sv, &mut heap, &mut seq);
+                // 出生带主的独立呼叫不走派梯，这里补同步待办、插停靠、
+                // 叫醒三件套。不叫醒的话车收不到任何事件，原地趴到天荒地老
+                if !pre_owned.is_empty() {
+                    sync_assignments(&mut w);
+                    for cid in pre_owned {
+                        let hit = match w.calls.get(cid) {
+                            Some(c) => c.owner.map(|o| (o, c.level, c.dir)),
+                            None => None,
+                        };
+                        if let Some((owner, lv, dir)) = hit {
+                            plan_for_moving(&mut w, owner, lv, dir);
+                            wake(&mut w, owner, &mut heap, &mut seq);
+                        }
+                    }
+                }
             }
 
             Kind::Abandon(pid) => {
@@ -207,6 +222,10 @@ fn after_event<A: Assigner>(
     // 只写回真的变了的槽位，也就不必再拷一份旧归属去比
     for (i, slot) in sv.owned.iter().enumerate() {
         if w.calls.calls[i].owner == *slot {
+            continue;
+        }
+        // 独立呼叫只属于一台车，重分配不动它
+        if w.calls.calls[i].exclusive {
             continue;
         }
         let live = {
@@ -296,21 +315,18 @@ fn abandon_to_stairs(w: &mut World, pid: usize, metrics: &mut Metrics) {
 
 /// 按每条外呼的 owner 重建各轿厢的待办列表。
 ///
-/// 只挂还亮着的外呼。灯的判据是槽位还指着它，这一条同时挡住了已灭的旧记录。
+/// 只挂还算数的外呼。共享看灯（槽位还指着它），独立看归属，
+/// 哪条都不满足的旧记录在这里掉队。
 fn sync_assignments(w: &mut World) {
     for c in &mut w.cars {
         c.assigned.clear();
     }
     for c in &w.calls.calls {
         let Some(owner) = c.owner else { continue };
-        let live = w
-            .calls
-            .slots
-            .get(Call::slot_index(c.level, c.dir, w.basement))
-            .copied()
-            .flatten()
-            == Some(c.id);
-        if live && owner < w.cars.len() {
+        if !call_is_live(w, c) {
+            continue;
+        }
+        if owner < w.cars.len() {
             w.cars[owner].assigned.push(c.id);
         }
     }
@@ -377,7 +393,19 @@ fn assign_unowned<A: Assigner>(
     }
 }
 
-/// 这条外呼还挂在层上吗（灯还亮着）。
+/// 这条外呼还算不算数。
+///
+/// 共享呼叫看槽位还指不指它（灯还亮着）。独立呼叫只属于一台车，
+/// 不进槽位，看归属还在不在。
+fn call_is_live(w: &World, c: &Call) -> bool {
+    if c.exclusive {
+        return c.owner.is_some();
+    }
+    is_live(w, c)
+}
+
+/// 这条外呼还挂在层上吗（灯还亮着）。只看共享槽位，独立呼叫走
+/// `call_is_live`，两者别混。
 fn is_live(w: &World, c: &Call) -> bool {
     if c.level < -w.basement || c.level > w.top {
         return false;
@@ -449,11 +477,15 @@ fn count_waiting(w: &World, level: i16, dir: Dir) -> usize {
 }
 
 /// 登记外呼。红线 1 与红线 2 都在这个函数里。
-fn register_calls(w: &mut World, level: i16, newly: &[usize]) {
+///
+/// 返回出生就带主的独立呼叫编号。它们不走派梯，调用方负责补
+/// 同步待办、插停靠、叫醒三件套（见 Arrive）。
+fn register_calls(w: &mut World, level: i16, newly: &[usize]) -> Vec<u32> {
     if newly.is_empty() {
-        return;
+        return Vec::new();
     }
     let per_car = w.cfg.call_surface == CallSurface::PerCarPanel;
+    let mut pre_owned: Vec<u32> = Vec::new();
     for &pid in newly {
         let p = w.pax[pid].clone();
         let wanted = if p.to > level { Dir::Up } else { Dir::Down };
@@ -481,11 +513,24 @@ fn register_calls(w: &mut World, level: i16, newly: &[usize]) {
                     let n = count_waiting(w, level, wanted);
                     let k = w.cars.len().min(2);
                     for t in 0..k {
-                        let (id, _) = w.calls.register(level, wanted, n, false);
+                        let (id, _) = w.calls.register(level, wanted, n, true);
+                        // 独立面板一车一按钮：这条呼叫从出生就属于这台车。
+                        // 车不服务这一层或已经卡死，就近换一台服务的，
+                        // 与 assign_unowned 里那道兜底同一条。实在没车可换
+                        // 就留成无主，等派梯捡走，总比出生即死锁强
+                        let owner = if w.car_serves(t, level) && w.cars[t].phase != CarPhase::Stalled
+                        {
+                            t
+                        } else {
+                            match w.serving_cars_least_busy(level).first() {
+                                Some(&alt) => alt,
+                                None => continue,
+                            }
+                        };
                         if let Some(c) = w.calls.get_mut(id) {
-                            c.exclusive = true;
-                            c.owner = Some(t);
+                            c.owner = Some(owner);
                         }
+                        pre_owned.push(id);
                     }
                 } else {
                     let n = count_waiting(w, level, wanted);
@@ -494,6 +539,7 @@ fn register_calls(w: &mut World, level: i16, newly: &[usize]) {
             }
         }
     }
+    pre_owned
 }
 
 /// 把一条外呼插进某台正在途中的轿厢。制动来不及就跳过，记一次越站。
@@ -807,6 +853,9 @@ fn begin_stop<B: Boarding>(
             kill_call(w, lv, dir);
         }
     }
+    // 独立面板下属于本车的呼叫：车到了，这一单就算应了，
+    // 有没有人上都不再留。留下来会变成下一次的幽灵循环
+    w.calls.clear_exclusive_owned_by(id, lv);
 
     let crush = w.cfg.boarding.capacity_crush(w.cfg.cars[id].capacity_rated);
     let _ = crush;
@@ -1286,7 +1335,7 @@ pub fn quick(mut cfg: Config, seed: u64) -> Run {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{preset, CarSpec};
+    use crate::config::{preset, CallSurface, CarSpec, StrategyMix};
     use crate::policy::RunView;
 
     fn small() -> Config {
@@ -1755,6 +1804,36 @@ mod tests {
         }
         assert!((sum - r.metrics.door_to_door.sum).abs() < 1e-6, "各层门到门之和对不上全局");
         assert_eq!(n, r.metrics.door_to_door.count, "各层门到门样本数对不上全局");
+    }
+
+    /// 红线 2：独立面板下同时呼叫多台，两台车都来，第一台上人，
+    /// 第二台扑空变幽灵停站。零送达意味着死锁。
+    #[test]
+    fn multi_call_summons_two_cars_and_ghosts_the_second() {
+        let mut c = Config::default();
+        c.building.top_level = 12;
+        c.building.units_per_floor = vec![4; 12];
+        c.cars = vec![CarSpec::default(); 2];
+        c.call_surface = CallSurface::PerCarPanel;
+        c.strategy = StrategyMix {
+            honest: 0.0,
+            press_both: 0.0,
+            press_up_only: 0.0,
+            multi_call: 1.0,
+        };
+        let r = default_run(c);
+        assert!(r.metrics.pax_total > 0, "这一份配置应当有乘客");
+        assert!(
+            r.metrics.pax_served > 0,
+            "多呼叫不能零送达，总 {} 送达 {}",
+            r.metrics.pax_total,
+            r.metrics.pax_served
+        );
+        assert!(
+            r.metrics.ghost_stops > 0,
+            "第二台车应当扑空出幽灵停站，实际 {}",
+            r.metrics.ghost_stops
+        );
     }
 
     /// 没人呼叫时，算法也能主动把轿厢挪到想待的那一层。

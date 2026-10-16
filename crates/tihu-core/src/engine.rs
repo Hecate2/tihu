@@ -249,7 +249,15 @@ impl CallBoard {
     ///
     /// 这是红线 1 的核心：同一个 `(楼层, 方向)` 上第二次按，不会产生第二条外呼，
     /// 也不会召来第二台轿厢，只是等待人数加一。
+    ///
+    /// 独立面板的多呼叫走另一条：同一个 `(楼层, 方向)` 可以并存两条外呼，
+    /// 各属于一台车，不走槽位去重。红线 2 在这里与红线 1 分道。
     pub fn register(&mut self, level: i16, dir: Dir, waiting: usize, exclusive: bool) -> (u32, bool) {
+        if exclusive {
+            let id = self.calls.len() as u32;
+            self.calls.push(Call { id, level, dir, owner: None, waiting, exclusive: true });
+            return (id, true);
+        }
         let s = self.slot(level, dir);
         if let Some(id) = self.slots[s] {
             self.calls[id as usize].waiting = waiting;
@@ -259,6 +267,19 @@ impl CallBoard {
         self.calls.push(Call { id, level, dir, owner: None, waiting, exclusive });
         self.slots[s] = Some(id);
         (id, true)
+    }
+
+    /// 到站消号：属于 `owner` 在 `level` 层的独立呼叫全部消号。
+    ///
+    /// 车到了，这一单就算应了，有人没人都消。共享槽位不动，
+    /// 别人的独立呼叫也不动。消号只清归属，记录本身保留，
+    /// 外呼编号永不复用的约定不变。
+    pub fn clear_exclusive_owned_by(&mut self, owner: CarId, level: i16) {
+        for c in &mut self.calls {
+            if c.exclusive && c.level == level && c.owner == Some(owner) {
+                c.owner = None;
+            }
+        }
     }
 
     pub fn clear_slot(&mut self, level: i16, dir: Dir) {
