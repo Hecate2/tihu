@@ -465,7 +465,9 @@ async function run() {
 
   // 这里只按种子范围估个次数，用来先画一句提示，真正跑几个种子由内核说了算。
   const runs = cfg.sim.seed_to ? cfg.sim.seed_to - cfg.sim.seed + 1 : 1;
-  const parallel = runs >= PARALLEL_MIN_RUNS;
+  // 超 1000 的范围不走并行：分片各自合法，会绕过内核的 seed_range 校验。
+  // 回退同步让内核报错，用户看得到红条，而不是浏览器卡死几十秒
+  const parallel = runs >= PARALLEL_MIN_RUNS && runs <= 1000;
   setNote(runs > 1 ? (parallel ? "正在并行跑 " + runs + " 个种子…" : "正在跑 " + runs + " 个种子…") : "");
   if (runs > 1) {
     // 先把这句话画到页面上，再开始算，不然页面会一直停在上一张图。

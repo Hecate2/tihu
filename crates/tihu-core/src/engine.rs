@@ -325,6 +325,9 @@ impl World {
     /// 乘客的到达时刻、目的层、拒挤度、体重、策略全部在这里抽完。
     /// 之后不管换什么调度算法，楼里都是同一批人。这是公平比较的前提。
     pub fn new(cfg: Config) -> Self {
+        // 空梯直接拦在这里，不然后面抽样深处索引越界，报错看不出原因。
+        // 网页链路先过 validate() 到不了这里，直调内核的研究者看这条。
+        assert!(!cfg.cars.is_empty(), "至少要有一台轿厢，先跑 Config::validate");
         let basement = cfg.building.basement_levels.max(0);
         let top = cfg.building.top_level;
         let n_levels = (top + basement + 1) as usize;
@@ -1089,6 +1092,16 @@ mod tests {
         assert_eq!(w.cars.len(), cfg.cars.len());
         assert_eq!(w.hall.len(), w.n_levels);
         assert_eq!(w.calls.calls.capacity(), 0, "预分配后不该立刻扩容");
+    }
+
+    /// 空梯配置在造世界时就明确报错，而不是在抽样深处索引越界。
+    #[test]
+    #[should_panic(expected = "至少要有一台轿厢")]
+    fn empty_cars_fails_fast_with_message() {
+        let mut c = preset_cfg();
+        c.cars.clear();
+        c.traffic.departure_ratio = 1.0;
+        let _w = World::new(c);
     }
 
     fn preset_cfg() -> Config {

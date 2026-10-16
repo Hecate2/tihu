@@ -124,8 +124,15 @@ function mergeFloors(parts) {
 
 // 把同一配置、同一算法、不交种子段的几份 SimReport 合成一份。
 // 输入是 report_json 交出来的 sim 对象，不是外层 Response。
+// 分片必须是批量报告（带 runs 与逐层的 live），单种子报告缺这些键，
+// 合出来是错数，这里直接抛错，调用方回退同步重跑。
 function mergeReports(partials) {
   if (!partials.length) throw new Error("没有分片可合并");
+  for (const p of partials) {
+    if (p.runs == null || p.seed_from == null) {
+      throw new Error("分片不是批量报告，没法合并");
+    }
+  }
   const runs = partials.map((p) => p.runs || 1);
   const total = runs.reduce((a, b) => a + b, 0);
   const widest = partials.map((p, i) => ({ p, runs: runs[i] }));
