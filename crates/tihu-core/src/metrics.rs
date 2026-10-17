@@ -176,8 +176,6 @@ pub struct FloorStats {
     pub d2d_samples: Summary,
     /// 被跳过的总次数
     pub bypass_total: u32,
-    /// 至少被跳过一次的乘客数
-    pub bypassed: u32,
     /// 因为不肯挤而没上去的次数
     pub declined: u32,
     /// 因为真没位子而没上去的次数

@@ -437,11 +437,20 @@ fn abandon_to_stairs(w: &mut World, pid: usize, metrics: &mut Metrics) {
     // 弃梯的人确实等过，这段时间要算进等待分布，否则报告里的等待会被
     // 系统性低估：等最久的那批人正好是弃梯走掉的那批
     metrics.wait.add(waited);
+    let (bypass, declined, no_space) = {
+        let p = &w.pax[pid];
+        (p.bypass_count, p.declined_count, p.no_space_count)
+    };
     let fs = &mut metrics.by_floor[qi];
     fs.count += 1;
     fs.wait_sum += waited;
     fs.wait_max = fs.wait_max.max(waited);
     fs.wait_samples.add(waited);
+    // 弃梯的人之前被跳过的那几次真实发生过，也要进逐层计数。
+    // 只在上车时才记，会让「跳过」总数漏掉最后改走楼梯的那批人
+    fs.bypass_total += bypass;
+    fs.declined += declined;
+    fs.no_space += no_space;
     let pax = &mut w.pax[pid];
     pax.abandoned = true;
     pax.t_board = t_arrive;
@@ -1309,9 +1318,6 @@ fn board_and_alight<B: Boarding>(
         fs.d2d_max = fs.d2d_max.max(d2d);
         fs.d2d_samples.add(d2d);
         fs.bypass_total += pax.bypass_count;
-        if pax.bypass_count > 0 {
-            fs.bypassed += 1;
-        }
         fs.declined += pax.declined_count;
         fs.no_space += pax.no_space_count;
     }
@@ -2311,6 +2317,37 @@ mod tests {
         c.traffic.departure_ratio = 1.0;
         let r = default_run(c);
         assert_eq!(r.metrics.abandoned, 0, "关掉之后不该有人弃梯");
+    }
+
+    /// 弃梯的人之前被跳过的那几次要留在逐层统计里。只在「上车」那一刻记，
+    /// 会让最后改走楼梯的那批人把跳过计数一起带走，逐层总数偏小。
+    #[test]
+    fn abandoned_passenger_keeps_bypass_counts() {
+        let mut w = World::new(small());
+        // 挑一个真正在等车的：有的乘客一出生就走了楼梯，t_exit 已经填上
+        let pid = w
+            .pax
+            .iter()
+            .position(|p| p.waiting())
+            .expect("该有人在等车");
+        let from = w.pax[pid].from;
+        let qi = w.qidx(from);
+        w.pax[pid].bypass_count = 2;
+        w.pax[pid].declined_count = 1;
+        w.pax[pid].no_space_count = 1;
+        w.pax[pid].t_arrive = w.now;
+        w.pax[pid].t_board = 0.0;
+        w.pax[pid].abandoned = false;
+        w.pax[pid].patience_s = 1.0;
+        w.pax[pid].abandon_at = w.now;
+        w.hall[qi].push(pid);
+        let mut metrics = Metrics::with_floors(w.n_levels);
+        abandon_to_stairs(&mut w, pid, &mut metrics);
+        let fs = &metrics.by_floor[qi];
+        assert!(w.pax[pid].abandoned, "这一位应当记成弃梯");
+        assert_eq!(fs.bypass_total, 2, "两次被跳过要进逐层总数");
+        assert_eq!(fs.declined, 1, "拒挤那次要留下");
+        assert_eq!(fs.no_space, 1, "没位子那次要留下");
     }
 
     /// 过期计时器不赶人。换腿和僵局重排都会推迟 abandon_at，
