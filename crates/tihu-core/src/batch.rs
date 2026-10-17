@@ -242,6 +242,7 @@ pub struct Scalars {
     pub pax_after_stall: f64,
     pub stalls: f64,
     pub stall_seconds: f64,
+    pub calls_orphaned: f64,
     pub ghost_stops: f64,
     pub partial_departures: f64,
     pub full_bypasses: f64,
@@ -265,6 +266,7 @@ struct ScalarAcc {
     pax_after_stall: Acc,
     stalls: Acc,
     stall_seconds: Acc,
+    calls_orphaned: Acc,
     ghost_stops: Acc,
     partial_departures: Acc,
     full_bypasses: Acc,
@@ -292,6 +294,7 @@ impl ScalarAcc {
         self.pax_after_stall.add(m.pax_after_stall as f64);
         self.stalls.add(m.stalls as f64);
         self.stall_seconds.add(m.stall_seconds);
+        self.calls_orphaned.add(m.calls_orphaned as f64);
         self.ghost_stops.add(m.ghost_stops as f64);
         self.partial_departures.add(m.partial_departures as f64);
         self.full_bypasses.add(m.full_bypasses as f64);
@@ -315,6 +318,7 @@ impl ScalarAcc {
             pax_after_stall: self.pax_after_stall.mean(),
             stalls: self.stalls.mean(),
             stall_seconds: self.stall_seconds.mean(),
+            calls_orphaned: self.calls_orphaned.mean(),
             ghost_stops: self.ghost_stops.mean(),
             partial_departures: self.partial_departures.mean(),
             full_bypasses: self.full_bypasses.mean(),

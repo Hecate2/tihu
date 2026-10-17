@@ -601,8 +601,8 @@ function render(s) {
   const rows2 = [
     ["总人数 / 送达人数", s.pax_total + " / " + s.pax_served],
     ["送达比例", fmt(s.serve_ratio * 100, 1) + "%"],
-    ["出门前就走楼梯", s.stair_users + "（" + fmt(s.stair_share * 100, 1) + "%）"],
-    ["半路改走楼梯", s.abandoned + " 人"],
+    ["走楼梯（含半路改走）", s.stair_users + "（" + fmt(s.stair_share * 100, 1) + "%）"],
+    ["其中半路改走楼梯", s.abandoned + " 人"],
     ["被跳过：位子不够", noSpace + " 次"],
     ["被跳过：人不愿挤", declined + " 次"],
     ["白停一次", s.ghost_stops + " 次"],
@@ -612,6 +612,7 @@ function render(s) {
     ["每 5 分钟送走", fmt(s.throughput_5min) + " 人"],
     ["超载卡死", s.stalls + " 次，累计 " + fmt(s.stall_seconds) + " 秒"],
     ["超载被请下车", s.pax_after_stall + " 人"],
+    ["因车卡住没人接的外呼", s.calls_orphaned + " 条"],
   ];
   document.getElementById("balance").innerHTML = rows2
     .map((r) => `<tr><td>${escHtml(r[0])}</td><td>${escHtml(r[1])}</td></tr>`)

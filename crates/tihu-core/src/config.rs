@@ -1168,6 +1168,11 @@ impl Config {
                 -self.building.basement_levels.max(0),
                 self.building.top_level.max(1),
             );
+            // 层号 0 不存在（MODEL 2.1）。无地下层时夹取区间的下界就是 0，
+            // 会把这个不存在的层放进来，落回主入口层
+            if c.initial_level == 0 {
+                c.initial_level = LOBBY;
+            }
         }
         self
     }
@@ -1343,6 +1348,22 @@ mod tests {
         let c = c.sanitized();
         assert_eq!(c.building.units_per_floor.len(), 12);
         assert!(c.validate().is_ok());
+    }
+
+    /// 层号 0 不存在。initial_level=0 要被 sanitized 落回主入口层，
+    /// 有地下层时也一样，别让轿厢从虚构的楼层起步。
+    #[test]
+    fn sanitize_moves_zero_initial_level_to_lobby() {
+        let mut c = Config::default();
+        c.cars[0].initial_level = 0;
+        let c = c.sanitized();
+        assert_eq!(c.cars[0].initial_level, LOBBY, "层号 0 不存在，要落回主入口层");
+
+        let mut c = c;
+        c.building.basement_levels = 2;
+        c.cars[0].initial_level = 0;
+        let c = c.sanitized();
+        assert_eq!(c.cars[0].initial_level, LOBBY, "有地下层时 0 也得落回主入口层");
     }
 
     /// 每层 18 户的大板楼合法，sanitized 不许打回 12。

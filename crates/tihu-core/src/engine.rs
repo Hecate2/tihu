@@ -183,6 +183,9 @@ pub struct Call {
     pub waiting: usize,
     /// 是否由乘客独立面板呼叫，若是则该呼叫只属于这一台车
     pub exclusive: bool,
+    /// 归到一台卡死的轿厢名下期间，层上的等待者全部放弃过。
+    /// 只给 `calls_orphaned` 用，保证一条外呼最多记一次
+    pub orphaned: bool,
 }
 
 /// 造视图用的预分配缓冲。反复复用，运行期不再分配。
@@ -280,6 +283,7 @@ impl CallBoard {
                 owner: None,
                 waiting,
                 exclusive: true,
+                orphaned: false,
             });
             return (id, true);
         }
@@ -296,6 +300,7 @@ impl CallBoard {
             owner: None,
             waiting,
             exclusive,
+            orphaned: false,
         });
         self.slots[s] = Some(id);
         (id, true)
@@ -699,6 +704,21 @@ impl World {
         }
     }
 
+    /// 这条外呼还算不算数。共享呼叫看槽位还指不指它，独立呼叫看归属还在不在。
+    ///
+    /// 编号永不复用，灭灯后的旧记录留在 `calls` 里备查，但它们不进算法视图。
+    /// 一条已经灭灯的呼叫挂在 `pending` 里，会把派梯算法引到没人的楼层去。
+    pub fn call_is_live(&self, c: &Call) -> bool {
+        if c.exclusive {
+            return c.owner.is_some();
+        }
+        if c.level < -self.basement || c.level > self.top {
+            return false;
+        }
+        let slot = Call::slot_index(c.level, c.dir, self.basement);
+        self.calls.slots.get(slot).copied().flatten() == Some(c.id)
+    }
+
     /// 填充全机视图的缓冲。这些 Vec 预先分配好，反复复用，运行期不再分配。
     pub fn fill_views(&self, sv: &mut Scratch) {
         sv.briefs.clear();
@@ -707,6 +727,9 @@ impl World {
         }
         sv.all.clear();
         for c in &self.calls.calls {
+            if !self.call_is_live(c) {
+                continue;
+            }
             sv.all.push(HallCall {
                 id: c.id,
                 level: c.level,
@@ -877,8 +900,8 @@ fn ln_gamma(z: f64) -> f64 {
 ///
 /// 早高峰下行时轿厢满载往下扫，途中几乎每层都有人要下。但不是每层都有人，
 /// 也有部分楼层被满载直驶掠过，所以取个系数并封顶。
-fn stops_per_trip(target_level: i16, cfg: &Config) -> f64 {
-    let _ = cfg;
+fn stops_per_trip(target_level: i16) -> f64 {
+    // TODO(calibration) 0.65 与 22 两个常数还没有出处，是粗估
     (target_level.max(0) as f64 * 0.65).min(22.0)
 }
 
@@ -895,7 +918,7 @@ fn estimate_wait(level: i16, cfg: &Config) -> f64 {
     let height = level.abs() as f64 * cfg.building.floor_height as f64;
     let one_way = traverse_time(height, spec.down).time;
     let per_stop = spec.doors.stop_overhead();
-    let stops = stops_per_trip(level, cfg);
+    let stops = stops_per_trip(level);
     // 一轮往返：上行接人加下行送人，各停一次
     let rtt = 2.0 * one_way + 2.0 * stops * per_stop;
     // 层越高越久

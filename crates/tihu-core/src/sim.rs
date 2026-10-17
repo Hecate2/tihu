@@ -87,6 +87,15 @@ pub fn run<R: Router, A: Assigner, B: Boarding>(
         std::collections::BinaryHeap::with_capacity(w.cars.len() + w.pax.len() * 2 + 8);
     let mut seq: u64 = 0;
     let mut metrics = Metrics::with_floors(w.n_levels);
+    // 出发前就走楼梯的人不进电梯厅，但逐层统计要算上他们，口径与全局
+    // `stair_users` 一致，见 MODEL 9.2。中途弃梯的在 `abandon_to_stairs`
+    // 里另加，两边合起来才等于全局那个数
+    for p in &w.pax {
+        if p.used_stairs {
+            let qi = w.qidx(p.from).clamp(0, w.n_levels - 1);
+            metrics.by_floor[qi].stair_users += 1;
+        }
+    }
 
     // 每位乘客的第一条腿排一次进场事件。两条腿的乘客，第二条腿的进场事件
     // 在他到站时按「出梯时刻加停留时长」再排，所以条件性需求不用提前知道
@@ -291,7 +300,25 @@ fn after_event<A: Assigner>(
                 == Some(c.id)
         };
         // 已经灭灯的外呼不许被重分配复活
-        w.calls.calls[i].owner = if live { *slot } else { None };
+        if !live {
+            w.calls.calls[i].owner = None;
+            continue;
+        }
+        let (level, dir) = (w.calls.calls[i].level, w.calls.calls[i].dir);
+        // 内核兜底：改判的目标车得真能来接这一层，判据见 `car_can_serve`。
+        // 算法把归属改到谁头上，内核都得替等梯的人守住这条底线。
+        // `None` 是算法主动放手，保持无人负责，等下一次分配
+        let owner = match *slot {
+            Some(car) if car_can_serve(w, car, level) => Some(car),
+            Some(_) => w.serving_cars_least_busy(level).first().copied(),
+            None => None,
+        };
+        w.calls.calls[i].owner = owner;
+        // 新车主可能正趴在原地，得叫醒。正在途中的顺手插一脚刹车
+        if let Some(car) = owner {
+            plan_for_moving(w, car, level, dir);
+            wake(w, car, heap, seq);
+        }
     }
     sync_assignments(w);
 }
@@ -391,6 +418,28 @@ fn abandon_to_stairs(w: &mut World, pid: usize, metrics: &mut Metrics) {
     if in_hall(w, pid, level) {
         w.hall[qi].retain(|&p| p != pid);
     }
+    // 少了一个人等，外呼上记的人数跟着降。两个方向都刷一遍，
+    // 反向叫梯的人按的是另一个方向
+    for dir in [Dir::Up, Dir::Down] {
+        refresh_waiting(w, level, dir);
+    }
+    // 这条外呼要是死在一台卡住的车上，打上标记。判据要求这层这个方向
+    // 已经没人再等，与 `collect` 里「还有人等」那条互斥，一条外呼只记一次
+    for dir in [Dir::Up, Dir::Down] {
+        if waiting_for(w, level, dir) {
+            continue;
+        }
+        let slot = Call::slot_index(level, dir, w.basement);
+        let Some(cid) = w.calls.slots.get(slot).copied().flatten() else {
+            continue;
+        };
+        let stalled = w.calls.get(cid).is_some_and(|c| owned_by_stalled(w, c));
+        if stalled {
+            if let Some(c) = w.calls.get_mut(cid) {
+                c.orphaned = true;
+            }
+        }
+    }
     // 弃梯的人确实等过，这段时间要算进等待分布，否则报告里的等待会被
     // 系统性低估：等最久的那批人正好是弃梯走掉的那批
     metrics.wait.add(waited);
@@ -428,6 +477,15 @@ fn sync_assignments(w: &mut World) {
     }
 }
 
+/// 内核兜底判据：这台车此刻真能来接这一层的人吗。
+///
+/// 三条一起看。车号越界是算法写错了下标，不服务这一层是算法漏了
+/// `StopSpec`，僵死车是算法不知道它卡住了。三条里任意一条成立，
+/// 内核都要换一台车，不能把外呼挂上去，也不能直接崩。
+fn car_can_serve(w: &World, car: CarId, level: i16) -> bool {
+    car < w.cars.len() && w.car_serves(car, level) && w.cars[car].phase != CarPhase::Stalled
+}
+
 /// 叫醒一台停在原地的轿厢。分配完新活之后调用。
 fn wake(w: &mut World, id: CarId, heap: &mut std::collections::BinaryHeap<Ev>, seq: &mut u64) {
     if w.cars[id].phase == CarPhase::Idle && !w.cars[id].next_event.is_finite() {
@@ -452,11 +510,21 @@ fn assign_unowned<A: Assigner>(
     seq: &mut u64,
 ) {
     w.fill_views(sv);
+    // 没人负责的呼叫里挑还算数的。共享呼叫看灯，独立呼叫看层上还有没有人等。
+    // 独立呼叫不进槽位，出生时若全场只有僵死车，它会带主为空地留下。
+    // 这时只看槽位就永远不会把它捡起来，等的人只能等到弃梯
+    let live = |c: &Call| {
+        if c.exclusive {
+            waiting_for(w, c.level, c.dir)
+        } else {
+            is_live(w, c)
+        }
+    };
     let unowned: Vec<HallCall> = w
         .calls
         .calls
         .iter()
-        .filter(|c| c.owner.is_none() && !w.calls.slots.is_empty() && is_live(w, c))
+        .filter(|c| c.owner.is_none() && !w.calls.slots.is_empty() && live(c))
         .map(|c| HallCall {
             id: c.id,
             level: c.level,
@@ -482,9 +550,10 @@ fn assign_unowned<A: Assigner>(
             (assigner.assign(&view, call), call)
         };
         let Some(car) = owner else { continue };
-        // 内核兜底：算法选中的车如果不服务这一层，换一台服务的。
-        // 再好的算法也可能漏掉这条约束，而漏掉的代价是那一层的人永远等不到车
-        let car = if w.car_serves(car, target.level) {
+        // 内核兜底：算法选中的车如果接不了这一层，换一台干得了的。
+        // 再好的算法也可能漏掉这条约束，而漏掉的代价是那一层的人
+        // 永远等不到车。判据见 `car_can_serve`
+        let car = if car_can_serve(w, car, target.level) {
             car
         } else {
             match w.serving_cars_least_busy(target.level).first() {
@@ -522,15 +591,43 @@ fn wake_serving_idle(
     }
 }
 
-/// 这条外呼还算不算数。
-///
-/// 共享呼叫看槽位还指不指它（灯还亮着）。独立呼叫只属于一台车，
-/// 不进槽位，看归属还在不在。
+/// 这条外呼现在归到一台卡死的轿厢名下了吗。
+fn owned_by_stalled(w: &World, c: &Call) -> bool {
+    c.owner
+        .is_some_and(|o| o < w.cars.len() && w.cars[o].phase == CarPhase::Stalled)
+}
+
+/// 这条外呼还算不算数。判据在 `World::call_is_live`。
 fn call_is_live(w: &World, c: &Call) -> bool {
-    if c.exclusive {
-        return c.owner.is_some();
+    w.call_is_live(c)
+}
+
+/// 电梯厅里的人数变了，把外呼上记的人数刷新一次。
+///
+/// 派梯算法读 `HallCall.waiting`。只在按键那一刻算一次的话，车接走一批人
+/// 以后这个数会一直偏大，算法会以为层上还排着长队
+fn refresh_waiting(w: &mut World, level: i16, dir: Dir) {
+    if level < -w.basement || level > w.top {
+        return;
     }
-    is_live(w, c)
+    let n = count_waiting(w, level, dir);
+    let slot = Call::slot_index(level, dir, w.basement);
+    if let Some(cid) = w.calls.slots.get(slot).copied().flatten() {
+        if let Some(c) = w.calls.get_mut(cid) {
+            c.waiting = n;
+        }
+    }
+    // 独立面板的呼叫不进槽位，从各车名下的待办里找
+    for id in 0..w.cars.len() {
+        for k in 0..w.cars[id].assigned.len() {
+            let cid = w.cars[id].assigned[k];
+            if let Some(c) = w.calls.get_mut(cid) {
+                if c.exclusive && c.level == level && c.dir == dir {
+                    c.waiting = n;
+                }
+            }
+        }
+    }
 }
 
 /// 这条外呼还挂在层上吗（灯还亮着）。只看共享槽位，独立呼叫走
@@ -549,7 +646,7 @@ fn is_live(w: &World, c: &Call) -> bool {
 /// 没人上，那一次停靠就是幽灵停站。这条判据正是红线 2 的落点。
 fn prune_calls(w: &mut World) {
     let mut dead: Vec<(i16, Dir)> = Vec::new();
-    for (i, slot) in w.calls.slots.iter().enumerate() {
+    for slot in &w.calls.slots {
         let Some(cid) = *slot else { continue };
         let Some(c) = w.calls.get(cid) else { continue };
         let (level, dir) = (c.level, c.dir);
@@ -559,7 +656,6 @@ fn prune_calls(w: &mut World) {
         } else if !owned && !waiting_for(w, level, dir) {
             dead.push((level, dir));
         }
-        let _ = i;
     }
     for (lv, dir) in dead {
         kill_call(w, lv, dir);
@@ -649,15 +745,14 @@ fn register_calls(w: &mut World, level: i16, newly: &[usize]) -> Vec<u32> {
                         // 车不服务这一层或已经卡死，就近换一台服务的，
                         // 与 assign_unowned 里那道兜底同一条。实在没车可换
                         // 就留成无主，等派梯捡走，总比出生即死锁强
-                        let owner =
-                            if w.car_serves(t, level) && w.cars[t].phase != CarPhase::Stalled {
-                                t
-                            } else {
-                                match w.serving_cars_least_busy(level).first() {
-                                    Some(&alt) => alt,
-                                    None => continue,
-                                }
-                            };
+                        let owner = if car_can_serve(w, t, level) {
+                            t
+                        } else {
+                            match w.serving_cars_least_busy(level).first() {
+                                Some(&alt) => alt,
+                                None => continue,
+                            }
+                        };
                         if let Some(c) = w.calls.get_mut(id) {
                             c.owner = Some(owner);
                         }
@@ -1069,11 +1164,12 @@ fn begin_stop<B: Boarding>(
         if !waiting_for(w, lv, dir) {
             kill_call(w, lv, dir);
             w.calls.clear_exclusive_owned_by(id, lv, dir);
+        } else {
+            // 刚接走一批人，外呼上记的人数要跟着降，别让算法以为队还很长
+            refresh_waiting(w, lv, dir);
         }
     }
 
-    let crush = w.cfg.boarding.capacity_crush(w.cfg.cars[id].capacity_rated);
-    let _ = crush;
     let doors = w.cfg.cars[id].doors;
     let base = (doors.open_s - doors.early_open_credit_s).max(0.0) as f64;
     let in_t = doors.transfer_time(w.cars[id].last_boarded, w.cars[id].last_alighted);
@@ -1568,7 +1664,7 @@ fn requeue_after_stall(
 /// 汇总指标。
 ///
 /// 时间类指标在乘客每次到站时就逐腿累加完了，这里只把配置、计数与均值补齐。
-fn collect(w: &World, stalls: usize, stall_seconds: f64, mut m: Metrics) -> Metrics {
+fn collect(w: &World, mut stalls: usize, mut stall_seconds: f64, mut m: Metrics) -> Metrics {
     m.pax_total = w.pax.len();
     for p in &w.pax {
         if p.hops_done == 0 {
@@ -1596,6 +1692,17 @@ fn collect(w: &World, stalls: usize, stall_seconds: f64, mut m: Metrics) -> Metr
     if !w.pax.is_empty() {
         m.stair_share = m.stair_users as f64 / w.pax.len() as f64;
     }
+    // 因轿厢卡死而没人接管的外呼。两种情形合起来算一条外呼一次：
+    // 等待者全部放弃时打了标记的，以及跑完时还挂在僵死车名下、层上还有人在等的
+    m.calls_orphaned += w
+        .calls
+        .calls
+        .iter()
+        .filter(|c| {
+            c.orphaned
+                || (call_is_live(w, c) && owned_by_stalled(w, c) && waiting_for(w, c.level, c.dir))
+        })
+        .count();
     for s in m.by_floor.iter_mut() {
         if s.count > 0 {
             s.wait_mean = s.wait_sum / s.count as f64;
@@ -1607,7 +1714,14 @@ fn collect(w: &World, stalls: usize, stall_seconds: f64, mut m: Metrics) -> Metr
         }
     }
 
-    // 系统视角
+    // 系统视角。跑到结束还没解除的僵局也要算，否则永久卡死的场景
+    // 反而报 0 次 0 秒，而那正是最严重的那种卡死
+    for c in &w.cars {
+        if c.phase == CarPhase::Stalled {
+            stalls += 1;
+            stall_seconds += (w.now - c.stall_since).max(0.0);
+        }
+    }
     m.stalls = stalls;
     m.stall_seconds = stall_seconds;
     m.n_cars = w.cars.len();
@@ -2651,6 +2765,384 @@ mod tests {
             assert!(p.hops[0].from >= 2, "院楼的客流不该从主入口层出发");
             assert!(p.hops[0].to >= 2);
         }
+    }
+
+    /// 回归：reassign 把外呼改判给趴着的车，内核要叫醒新车主。
+    ///
+    /// 修好之前写回只改归属表，不排事件。安静时段被救援的外呼会枯等到
+    /// 弃梯或者仿真结束，而接活的车还趴在原地。
+    #[test]
+    fn reassign_wakes_the_new_owner() {
+        struct MoveAllToCar1;
+        impl Assigner for MoveAllToCar1 {
+            fn name(&self) -> &'static str {
+                "move_all_to_car_1"
+            }
+            fn assign(&self, _v: &SystemView<'_>, _c: HallCall) -> Option<CarId> {
+                Some(0)
+            }
+            fn reassign(&self, _v: &SystemView<'_>, owned: &mut [Option<CarId>]) {
+                for o in owned.iter_mut() {
+                    if o.is_some() {
+                        *o = Some(1);
+                    }
+                }
+            }
+        }
+        let mut c = small();
+        c.cars = vec![CarSpec::default(); 2];
+        let mut w = World::new(c);
+        assert_eq!(w.cars[1].phase, CarPhase::Idle);
+        assert!(!w.cars[1].next_event.is_finite(), "前提：车 1 趴在原地");
+        w.calls.register(5, Dir::Down, 1, false);
+        let id = w.calls.calls[0].id;
+        w.calls.get_mut(id).unwrap().owner = Some(0);
+        let mut sv = Scratch::new(w.cars.len(), w.n_levels);
+        let mut heap = std::collections::BinaryHeap::new();
+        let mut seq = 0u64;
+        after_event(&mut w, &MoveAllToCar1, &mut sv, &mut heap, &mut seq);
+        assert_eq!(w.calls.get(id).unwrap().owner, Some(1), "改判应当写回");
+        assert!(
+            heap.iter().any(|e| matches!(e.kind, Kind::CarStep(1))),
+            "改判给车 1 之后要给它排一步，否则它不知道有活"
+        );
+        // 叫醒之后要真的开走。醒一下就趴回去等于没修
+        let mut router = DownPeakSweep;
+        let boarding = DefaultBoarding::default();
+        let mut rng = Streams::new(1);
+        let mut metrics = Metrics::with_floors(w.n_levels);
+        step_car(
+            &mut w,
+            1,
+            &mut router,
+            &boarding,
+            &mut sv,
+            &mut heap,
+            &mut seq,
+            &mut rng,
+            &mut metrics,
+        );
+        assert_eq!(w.cars[1].phase, CarPhase::Moving, "车 1 应当动起来");
+        assert_eq!(w.cars[1].leg_target, 5, "车 1 应当开去找 5 层那条外呼");
+    }
+
+    /// 回归：reassign 把外呼改判给停不了这一层的车，内核要换回能服务的。
+    ///
+    /// `RescueWrapper` 这类算法只看负载挑车。内核若不管，外呼会挂在一台
+    /// 永远不会来这一层的车上，等在那层的人谁都等不到车。
+    #[test]
+    fn reassign_to_unserving_car_falls_back() {
+        use crate::config::StopSpec;
+        struct MoveAllToCar1;
+        impl Assigner for MoveAllToCar1 {
+            fn name(&self) -> &'static str {
+                "move_all_to_car_1"
+            }
+            fn assign(&self, _v: &SystemView<'_>, _c: HallCall) -> Option<CarId> {
+                Some(0)
+            }
+            fn reassign(&self, _v: &SystemView<'_>, owned: &mut [Option<CarId>]) {
+                for o in owned.iter_mut() {
+                    if o.is_some() {
+                        *o = Some(1);
+                    }
+                }
+            }
+        }
+        let mut c = small();
+        let c0 = CarSpec {
+            stops: StopSpec::zone(1, 10),
+            ..CarSpec::default()
+        };
+        let c1 = CarSpec {
+            stops: StopSpec::zone(1, 2),
+            ..CarSpec::default()
+        };
+        c.cars = vec![c0, c1];
+        let mut w = World::new(c);
+        assert!(
+            w.car_serves(0, 6) && !w.car_serves(1, 6),
+            "前提：只有车 0 停 6 层"
+        );
+        w.calls.register(6, Dir::Down, 1, false);
+        let id = w.calls.calls[0].id;
+        w.calls.get_mut(id).unwrap().owner = Some(0);
+        let mut sv = Scratch::new(w.cars.len(), w.n_levels);
+        let mut heap = std::collections::BinaryHeap::new();
+        let mut seq = 0u64;
+        after_event(&mut w, &MoveAllToCar1, &mut sv, &mut heap, &mut seq);
+        assert_eq!(
+            w.calls.get(id).unwrap().owner,
+            Some(0),
+            "改判到不服务 6 层的车，内核必须换回能服务的车"
+        );
+    }
+
+    /// 回归：`RoundRobin` 选中卡死的车时，内核兜底要把新外呼给能干的。
+    #[test]
+    fn stalled_car_never_owns_new_calls() {
+        let mut c = small();
+        c.cars = vec![CarSpec::default(); 2];
+        let mut w = World::new(c);
+        w.cars[0].phase = CarPhase::Stalled;
+        w.cars[0].stall_since = -100.0;
+        w.calls.register(5, Dir::Down, 1, false);
+        let id = w.calls.calls[0].id;
+        let mut sv = Scratch::new(w.cars.len(), w.n_levels);
+        let mut heap = std::collections::BinaryHeap::new();
+        let mut seq = 0u64;
+        let rr = crate::builtin::RoundRobin::default();
+        assign_unowned(&mut w, &rr, &mut sv, &mut heap, &mut seq);
+        assert_eq!(
+            w.calls.get(id).unwrap().owner,
+            Some(1),
+            "僵死车不该拿新外呼，活该给能干活的那台"
+        );
+    }
+
+    /// 回归：算法返回越界的轿厢号，内核兜底要接住，不能直接 panic。
+    ///
+    /// `assign` 与 `reassign` 都是外部算法的返回值，写错一个下标就能
+    /// 把整场仿真打崩。内核既然已经在兜「不服务这一层」，这条也得兜。
+    #[test]
+    fn out_of_range_car_id_falls_back_instead_of_panicking() {
+        struct BadAssigner;
+        impl Assigner for BadAssigner {
+            fn name(&self) -> &'static str {
+                "bad"
+            }
+            fn assign(&self, _v: &SystemView<'_>, _c: HallCall) -> Option<CarId> {
+                Some(99)
+            }
+            fn reassign(&self, _v: &SystemView<'_>, owned: &mut [Option<CarId>]) {
+                for o in owned.iter_mut() {
+                    if o.is_some() {
+                        *o = Some(99);
+                    }
+                }
+            }
+        }
+        let mut c = small();
+        c.cars = vec![CarSpec::default(); 2];
+        let mut w = World::new(c);
+        w.calls.register(5, Dir::Down, 1, false);
+        let id = w.calls.calls[0].id;
+        let mut sv = Scratch::new(w.cars.len(), w.n_levels);
+        let mut heap = std::collections::BinaryHeap::new();
+        let mut seq = 0u64;
+        assign_unowned(&mut w, &BadAssigner, &mut sv, &mut heap, &mut seq);
+        assert!(
+            w.calls.get(id).unwrap().owner.is_some_and(|o| o < 2),
+            "越界车号要换成真正存在的车，实际 {:?}",
+            w.calls.get(id).unwrap().owner
+        );
+        after_event(&mut w, &BadAssigner, &mut sv, &mut heap, &mut seq);
+        assert!(
+            w.calls.get(id).unwrap().owner.is_some_and(|o| o < 2),
+            "改判写回同样要挡住越界车号，实际 {:?}",
+            w.calls.get(id).unwrap().owner
+        );
+    }
+
+    /// 回归：多呼叫面板下全场皆卡死，出生就无主的独立外呼恢复后要能被捡起来。
+    ///
+    /// 独立呼叫不进槽位，只看槽位的派梯永远看不到它，等的人只能弃梯。
+    #[test]
+    fn ownerless_exclusive_call_is_picked_up_after_the_stall_clears() {
+        let mut c = small();
+        c.cars = vec![CarSpec::default(); 2];
+        c.call_surface = CallSurface::PerCarPanel;
+        c.strategy = StrategyMix {
+            honest: 0.0,
+            press_both: 0.0,
+            press_up_only: 0.0,
+            multi_call: 1.0,
+        };
+        let mut w = World::new(c);
+        // 递 0 号乘客到 5 层，按多呼叫面板同时按两台
+        w.pax[0].from = 5;
+        w.pax[0].to = 1;
+        w.pax[0].t_arrive = 0.0;
+        w.pax[0].t_exit = 0.0;
+        w.pax[0].used_stairs = false;
+        w.pax[0].abandoned = false;
+        w.pax[0].boarded_car = None;
+        w.pax[0].strategy = Strategy::MultiCall;
+        let qi = w.qidx(5);
+        w.hall[qi].push(0);
+        for car in &mut w.cars {
+            car.phase = CarPhase::Stalled;
+            car.stall_since = -100.0;
+        }
+        let pre = register_calls(&mut w, 5, &[0]);
+        assert!(pre.is_empty(), "前提：全场僵死时多呼叫生不出归属");
+        let id = w.calls.calls.len() as u32 - 1;
+        assert!(
+            w.calls
+                .get(id)
+                .is_some_and(|c| c.exclusive && c.owner.is_none()),
+            "前提：这条独立外呼出生无主"
+        );
+        // 僵局解除，派梯要把它捡起来，不能因为不进槽位就永远看不见
+        w.cars[0].phase = CarPhase::Idle;
+        w.cars[0].stall_since = 0.0;
+        let mut sv = Scratch::new(w.cars.len(), w.n_levels);
+        let mut heap = std::collections::BinaryHeap::new();
+        let mut seq = 0u64;
+        assign_unowned(
+            &mut w,
+            &crate::builtin::RoundRobin::default(),
+            &mut sv,
+            &mut heap,
+            &mut seq,
+        );
+        assert_eq!(
+            w.calls.get(id).unwrap().owner,
+            Some(0),
+            "僵局解除后要有一条车接手这条独立外呼"
+        );
+    }
+
+    /// 灭灯的外呼不进算法视图。编号永不复用，旧记录留在表里，
+    /// 但它们不能挂在 `pending` 里，否则派梯会被引到没人的楼层。
+    #[test]
+    fn dead_calls_stay_out_of_the_system_view() {
+        let mut w = World::new(small());
+        w.calls.register(5, Dir::Down, 1, false);
+        let id = w.calls.calls[0].id;
+        kill_call(&mut w, 5, Dir::Down);
+        let mut sv = Scratch::new(w.cars.len(), w.n_levels);
+        w.fill_views(&mut sv);
+        assert!(
+            sv.all.iter().all(|c| c.id != id),
+            "灭灯的外呼不该出现在 all_calls 里"
+        );
+        assert!(sv.pending.is_empty(), "灭灯的外呼也不该挂在 pending 里");
+    }
+
+    /// 外呼上记的等待人数要跟着实际队长短，不能停在按键那一刻。
+    #[test]
+    fn call_waiting_count_tracks_the_queue() {
+        let mut c = small();
+        c.traffic.departure_ratio = 0.9;
+        let mut w = World::new(c);
+        assert!(w.pax.len() >= 3, "前提：至少三位乘客");
+        // 三个人在 5 层等下行
+        for pid in 0..3 {
+            w.pax[pid].from = 5;
+            w.pax[pid].to = 1;
+            w.pax[pid].t_arrive = 0.0;
+            w.pax[pid].t_exit = 0.0;
+            w.pax[pid].used_stairs = false;
+            w.pax[pid].abandoned = false;
+            w.pax[pid].boarded_car = None;
+            w.pax[pid].patience_s = f64::INFINITY;
+        }
+        let qi = w.qidx(5);
+        w.hall[qi].extend([0, 1, 2]);
+        w.calls.register(5, Dir::Down, 3, false);
+        let mut metrics = Metrics::with_floors(w.n_levels);
+        w.now = 100.0;
+        abandon_to_stairs(&mut w, 0, &mut metrics);
+        let mut sv = Scratch::new(w.cars.len(), w.n_levels);
+        w.fill_views(&mut sv);
+        let call = sv
+            .all
+            .iter()
+            .find(|c| c.level == 5 && c.dir == Dir::Down)
+            .expect("这条外呼还亮着");
+        assert_eq!(call.waiting, 2, "走掉一个人以后该只剩两个人");
+    }
+
+    /// 逐层走楼梯人数与全局口径一致：
+    /// 出发前走楼梯的人加中途弃梯的人，两边必须相等。
+    #[test]
+    fn floor_stair_users_add_up_to_the_global_count() {
+        let mut c = Config::default();
+        c.building.top_level = 18;
+        c.building.units_per_floor = vec![4; 18];
+        c.building.ground_floor_residential = true;
+        c.traffic.departure_ratio = 0.9;
+        let r = quick(c, 11);
+        assert!(r.metrics.stair_users > 0, "这份配置该有人走楼梯");
+        let per_floor: usize = r
+            .metrics
+            .by_floor
+            .iter()
+            .map(|f| f.stair_users as usize)
+            .sum();
+        assert_eq!(
+            per_floor, r.metrics.stair_users,
+            "逐层加起来要与全局 stair_users 相等"
+        );
+    }
+
+    /// 外呼挂在卡死车名下算「没人接管」：跑完时人还在等算一次，
+    /// 人全部放弃也算一次。两条路径不能重复计。
+    #[test]
+    fn calls_orphaned_counts_calls_left_on_a_stalled_car() {
+        // 一：人还在等，跑完时外呼还挂在卡死的车 0 名下
+        let mut c = small();
+        c.cars = vec![CarSpec::default(); 2];
+        let mut w = World::new(c);
+        assert!(!w.pax.is_empty(), "前提：world 里得有位乘客可用");
+        w.cars[0].phase = CarPhase::Stalled;
+        w.cars[0].stall_since = -100.0;
+        w.pax[0].from = 5;
+        w.pax[0].to = 1;
+        w.pax[0].t_arrive = 0.0;
+        w.pax[0].t_exit = 0.0;
+        w.pax[0].used_stairs = false;
+        w.pax[0].abandoned = false;
+        w.pax[0].boarded_car = None;
+        let qi = w.qidx(5);
+        w.hall[qi].push(0);
+        w.calls.register(5, Dir::Down, 1, false);
+        let id = w.calls.calls[0].id;
+        w.calls.get_mut(id).unwrap().owner = Some(0);
+        let m = collect(&w, 0, 0.0, Metrics::with_floors(w.n_levels));
+        assert_eq!(m.calls_orphaned, 1, "还挂着没人接，要记一次");
+
+        // 二：人放弃走楼梯，同一条外呼不能再被数一次
+        let mut m = Metrics::with_floors(w.n_levels);
+        w.pax[0].patience_s = f64::INFINITY;
+        w.now = 100.0;
+        abandon_to_stairs(&mut w, 0, &mut m);
+        assert!(w.pax[0].abandoned, "前提：这位乘客应当弃梯");
+        let m = collect(&w, 0, 0.0, m);
+        assert_eq!(
+            m.calls_orphaned, 1,
+            "弃梯那条路径打标记，与跑完时那条互斥，只算一次"
+        );
+    }
+
+    /// 卡住的车名下会真的留下没人接的外呼。
+    ///
+    /// 场景是人为搭的：一台梯先接下几层的外呼，然后永远卡死。
+    /// 名下那些外呼既没人改派，层上的人只能弃梯，这就是红线 6 的损耗。
+    #[test]
+    fn overload_stall_leaves_orphaned_calls() {
+        let mut c = Config::default();
+        c.building.top_level = 18;
+        c.building.units_per_floor = vec![6; 18];
+        c.building.ground_floor_residential = true;
+        c.cars = vec![CarSpec::default()];
+        c.traffic.pattern = crate::config::Pattern::MorningDown;
+        c.traffic.departure_ratio = 0.9;
+        c.stairs.abandon_after_s = 60.0;
+        c.overload.enabled = true;
+        c.overload.trigger_ratio = 0.1;
+        c.overload.q_last = 0.0;
+        c.overload.q_other = 0.0;
+        c.overload.stall_timeout_s = 1e9;
+        c.sim.horizon_s = 3600.0;
+        let r = quick(c, 3);
+        assert!(r.metrics.stalls > 0, "前提：这台梯会卡住");
+        assert!(
+            r.metrics.calls_orphaned > 0,
+            "车卡住时名下的外呼没人接，实际 {}",
+            r.metrics.calls_orphaned
+        );
     }
 
     /// 弃梯受步层数上限约束：没人会爬二十层楼梯。

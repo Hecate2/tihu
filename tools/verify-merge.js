@@ -57,7 +57,7 @@ const mergeReports = globalThis.mergeReports;
     for (const k of ["serve_ratio", "stair_share", "rtt_mean", "throughput_5min", "pax_any_bypass", "stall_seconds"]) {
       cmp(got[k], want[k], k);
     }
-    for (const k of ["pax_total", "pax_served", "stair_users", "abandoned", "ghost_stops", "partial_departures", "overshoots"]) {
+    for (const k of ["pax_total", "pax_served", "stair_users", "abandoned", "stalls", "calls_orphaned", "ghost_stops", "partial_departures", "full_bypasses", "overshoots"]) {
       cmpInt(got[k], want[k], k);
     }
     let histDiff = 0;

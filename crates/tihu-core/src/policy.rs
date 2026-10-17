@@ -54,7 +54,7 @@ pub struct HallCall {
     pub dir: Dir,
     /// 已经派给谁。`None` 表示还没派
     pub owner: Option<CarId>,
-    /// 这个楼层同方向有多少人在等
+    /// 这个楼层同方向此刻有多少人在等。到达、上车、弃梯都会刷新它
     pub waiting: usize,
 }
 
@@ -63,9 +63,9 @@ pub struct HallCall {
 pub struct SystemView<'a> {
     pub now: f64,
     pub cars: &'a [CarBrief],
-    /// 还没分配给任何轿厢的外呼
+    /// 还没分配给任何轿厢、也还亮着的外呼
     pub pending: &'a [HallCall],
-    /// 全部外呼，含已分配
+    /// 全部还算数的外呼，含已分配。灭灯的历史记录不进视图
     pub all_calls: &'a [HallCall],
     /// 每层的等待人数，下标是 `(level + 1) * 2 + dir`
     pub queue_len: &'a [u32],
