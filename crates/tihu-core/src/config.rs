@@ -11,6 +11,14 @@ use crate::motion::{DoorTiming, MotionProfile};
 /// 地下层用负数，B1 是 -1，B2 是 -2。层号 0 不存在。
 pub const LOBBY: i16 = 1;
 
+/// 住户从车库层出门或回家的比例。有地下层时，入口层落回主入口层的概率
+/// 就是 `1 - BASEMENT_ENTRANCE_PROB`。
+///
+/// TODO(calibration) 车库进出占比。现在是行业通行量级，等实测标定。
+/// 生成阶段（`engine::pick_entrance_level`）与估算阶段（`expected_trips`）
+/// 共用这一个常数，改一处两处一起动。
+pub const BASEMENT_ENTRANCE_PROB: f64 = 0.07;
+
 /// 一次批量运行最多几个种子。
 ///
 /// 实测一千个种子在十八层两梯四户约 2.3 秒，三十三层两梯六户约 6.5 秒，见
@@ -109,7 +117,9 @@ impl Building {
 
     /// 全楼住户总数。
     pub fn total_residents(&self) -> usize {
-        (LOBBY..=self.highest_level()).map(|f| self.residents_at(f)).sum()
+        (LOBBY..=self.highest_level())
+            .map(|f| self.residents_at(f))
+            .sum()
     }
 
     /// 最高住宅层的绝对高度，米。
@@ -173,12 +183,32 @@ impl Default for WeightMix {
     fn default() -> Self {
         Self {
             peaks: vec![
-                WeightPeak { kind: WeightKind::AdultMale, share: 0.38, median_kg: 68.0, cv: 0.15 },
-                WeightPeak { kind: WeightKind::AdultFemale, share: 0.36, median_kg: 56.0, cv: 0.15 },
+                WeightPeak {
+                    kind: WeightKind::AdultMale,
+                    share: 0.38,
+                    median_kg: 68.0,
+                    cv: 0.15,
+                },
+                WeightPeak {
+                    kind: WeightKind::AdultFemale,
+                    share: 0.36,
+                    median_kg: 56.0,
+                    cv: 0.15,
+                },
                 // 小孩占比较小，早高峰跟着大人出门的那一撮
-                WeightPeak { kind: WeightKind::Child, share: 0.18, median_kg: 26.0, cv: 0.22 },
+                WeightPeak {
+                    kind: WeightKind::Child,
+                    share: 0.18,
+                    median_kg: 26.0,
+                    cv: 0.22,
+                },
                 // 很重的人。比例小但绝对数不小，是超载报警的主要来源
-                WeightPeak { kind: WeightKind::Heavy, share: 0.06, median_kg: 105.0, cv: 0.18 },
+                WeightPeak {
+                    kind: WeightKind::Heavy,
+                    share: 0.06,
+                    median_kg: 105.0,
+                    cv: 0.18,
+                },
             ],
             carried_kg: 2.5, // TODO(calibration) 衣物加随身物品
         }
@@ -208,7 +238,10 @@ impl WeightMix {
                 return (p.median_kg, p.cv);
             }
         }
-        self.peaks.last().map(|p| (p.median_kg, p.cv)).unwrap_or((65.0, 0.18))
+        self.peaks
+            .last()
+            .map(|p| (p.median_kg, p.cv))
+            .unwrap_or((65.0, 0.18))
     }
 }
 
@@ -319,7 +352,11 @@ impl CarSpec {
     /// 由额定载重推出额定载客人数。行业常规按每人 75 公斤折算。
     pub fn from_load(rated_load_kg: f32) -> Self {
         let cap = (rated_load_kg / 75.0).round().max(1.0) as usize;
-        Self { rated_load_kg, capacity_rated: cap, ..Self::default() }
+        Self {
+            rated_load_kg,
+            capacity_rated: cap,
+            ..Self::default()
+        }
     }
 }
 
@@ -474,7 +511,12 @@ pub struct StrategyMix {
 impl Default for StrategyMix {
     /// 默认全员老实。
     fn default() -> Self {
-        Self { honest: 1.0, press_both: 0.0, press_up_only: 0.0, multi_call: 0.0 }
+        Self {
+            honest: 1.0,
+            press_both: 0.0,
+            press_up_only: 0.0,
+            multi_call: 0.0,
+        }
     }
 }
 
@@ -558,16 +600,16 @@ impl Default for Stairs {
     fn default() -> Self {
         Self {
             enabled: true,
-            per_floor_s: 4.5,       // TODO(calibration)
+            per_floor_s: 4.5,        // TODO(calibration)
             per_floor_effort_s: 2.5, // TODO(calibration)
-            fixed_s: 5.0,           // TODO(calibration)
-            tau_s: 45.0,            // TODO(calibration)
-            up_effort_mult: 3.0,    // TODO(calibration)
-            base_willingness: 0.24, // TODO(calibration)
-            decay_per_floor: 0.055, // TODO(calibration) 每层的相对衰减
-            practical_floor_cap: 6,    // TODO(calibration) 六层以上基本没人走
-            abandon_after_s: 1200.0,   // TODO(calibration) 二十分钟等不到人就会走
-            abandon_cv: 0.45,          // TODO(calibration)
+            fixed_s: 5.0,            // TODO(calibration)
+            tau_s: 45.0,             // TODO(calibration)
+            up_effort_mult: 3.0,     // TODO(calibration)
+            base_willingness: 0.24,  // TODO(calibration)
+            decay_per_floor: 0.055,  // TODO(calibration) 每层的相对衰减
+            practical_floor_cap: 6,  // TODO(calibration) 六层以上基本没人走
+            abandon_after_s: 1200.0, // TODO(calibration) 二十分钟等不到人就会走
+            abandon_cv: 0.45,        // TODO(calibration)
         }
     }
 }
@@ -679,7 +721,9 @@ impl Boarding {
             return 1.0;
         }
         let span = 1.0 - self.soft_start_ratio;
-        let rho = ((load_ratio - self.soft_start_ratio) / span).clamp(0.0, 1.0).powf(self.gamma);
+        let rho = ((load_ratio - self.soft_start_ratio) / span)
+            .clamp(0.0, 1.0)
+            .powf(self.gamma);
         let impatience = (waited_s / self.wait_ref_s).min(1.0) * self.impatience_gain;
         (1.0 - tol * rho + impatience).clamp(0.0, 1.0)
     }
@@ -740,9 +784,9 @@ impl Default for Overload {
             enabled: false,
             trigger_ratio: 1.05, // TODO(calibration) 对照安全规范条文
             stall_tick_s: 10.0,
-            q_last: 0.35,           // TODO(calibration)
-            q_other: 0.05,          // TODO(calibration)
-            stress_growth: 1.6,     // TODO(calibration)
+            q_last: 0.35,       // TODO(calibration)
+            q_other: 0.05,      // TODO(calibration)
+            stress_growth: 1.6, // TODO(calibration)
             stall_timeout_s: 300.0,
         }
     }
@@ -772,7 +816,13 @@ impl Default for Sim {
     /// 两者相等的话，最后一批人刚到电梯厅仿真就结束了，结果是「完成数」偏低，
     /// 而那不是拥堵造成的，是仿真截断造成的
     fn default() -> Self {
-        Self { seed: 42, seed_to: None, horizon_s: 5400.0, days: 1, evolution_epsilon: 0.01 }
+        Self {
+            seed: 42,
+            seed_to: None,
+            horizon_s: 5400.0,
+            days: 1,
+            evolution_epsilon: 0.01,
+        }
     }
 }
 
@@ -833,11 +883,21 @@ pub struct Issue {
 
 impl Issue {
     fn error(code: &'static str, message: String) -> Self {
-        Self { severity: Severity::Error, code, message, level: None }
+        Self {
+            severity: Severity::Error,
+            code,
+            message,
+            level: None,
+        }
     }
 
     fn warn(code: &'static str, message: String) -> Self {
-        Self { severity: Severity::Warn, code, message, level: None }
+        Self {
+            severity: Severity::Warn,
+            code,
+            message,
+            level: None,
+        }
     }
 }
 
@@ -890,7 +950,8 @@ impl Config {
             ));
         }
         if self.cars.is_empty() {
-            v.issues.push(Issue::error("no_cars", "至少要有一台轿厢".into()));
+            v.issues
+                .push(Issue::error("no_cars", "至少要有一台轿厢".into()));
         }
         if self.cars.len() > 12 {
             v.issues.push(Issue::warn(
@@ -917,7 +978,9 @@ impl Config {
             let max_persons = (area / b.min_area_per_person_m2).floor() as i32;
             for level in 1..=b.top_level {
                 let idx = (level - 1) as usize;
-                let Some(&units) = b.units_per_floor.get(idx) else { continue };
+                let Some(&units) = b.units_per_floor.get(idx) else {
+                    continue;
+                };
                 let units = units as i32;
                 let persons = units as f32 * b.persons_per_unit;
                 if units > max_units {
@@ -956,9 +1019,7 @@ impl Config {
                         code: "density_tight",
                         message: format!(
                             "第 {} 层人均 {:.1} m²，已经逼近 {:.0} m² 的下限，实际楼盘不太可能这样",
-                            level,
-                            per_person,
-                            b.min_area_per_person_m2
+                            level, per_person, b.min_area_per_person_m2
                         ),
                         level: Some(level),
                     });
@@ -969,14 +1030,21 @@ impl Config {
         if self.traffic.departure_ratio <= 0.0 || self.traffic.departure_ratio > 1.0 {
             v.issues.push(Issue::error(
                 "departure_ratio",
-                format!("出行率应在 0 到 1 之间，当前 {:.2}", self.traffic.departure_ratio),
+                format!(
+                    "出行率应在 0 到 1 之间，当前 {:.2}",
+                    self.traffic.departure_ratio
+                ),
             ));
         }
         if self.traffic.peak_alpha <= 0.0 || self.traffic.peak_beta <= 0.0 {
-            v.issues.push(Issue::error("peak_shape", "强度曲线的两个参数都要大于 0".into()));
+            v.issues.push(Issue::error(
+                "peak_shape",
+                "强度曲线的两个参数都要大于 0".into(),
+            ));
         }
         if self.sim.horizon_s <= 0.0 {
-            v.issues.push(Issue::error("horizon", "仿真时长要大于 0".into()));
+            v.issues
+                .push(Issue::error("horizon", "仿真时长要大于 0".into()));
         }
         // 种子范围的宽度。结束值不大于根种子时按单次跑，不报错
         if let Some(to) = self.sim.seed_to {
@@ -1045,7 +1113,8 @@ impl Config {
             }
             for f in &self.traffic.flows {
                 if f.share < 0.0 {
-                    v.issues.push(Issue::error("flow_share", "客流占比不能是负数".into()));
+                    v.issues
+                        .push(Issue::error("flow_share", "客流占比不能是负数".into()));
                 }
                 for level in [f.from, f.to] {
                     if level < b.lowest_level() || level > b.highest_level() {
@@ -1095,23 +1164,41 @@ impl Config {
             c.down = c.down.sanitized();
             c.capacity_rated = c.capacity_rated.clamp(1, 40);
             c.rated_load_kg = c.rated_load_kg.clamp(100.0, 5000.0);
-            c.initial_level = c
-                .initial_level
-                .clamp(-self.building.basement_levels.max(0), self.building.top_level.max(1));
+            c.initial_level = c.initial_level.clamp(
+                -self.building.basement_levels.max(0),
+                self.building.top_level.max(1),
+            );
         }
         self
     }
 
-    /// 全楼住户乘出行率，估出的行程段数。
+    /// 全楼住户乘出行率，估出的上梯人数。用于给乘客向量预留容量和展示。
     ///
-    /// 主入口层住的人出门抬脚就到，回家不用上楼，这段需求不经过电梯，
-    /// 所以从估算里扣掉，估算值才对得上实际生成的乘客数。
+    /// 口径要与 `engine::build_pax` 实际生成的东西对齐：每户出一团，团人数
+    /// 是户均人数四舍五入，另有一小撮反向细流（`reverse_ratio`）。所以先按
+    /// 户数算，不能按住户总数算，也不能漏掉反向那一撮。
+    ///
+    /// 主入口层那几户是个例外。他们的出发层和入口层抽到一起时是零长度行程，
+    /// 不上电梯，`emit_party` 会把这种团丢掉。入口抽在主入口层，还是抽到车库，
+    /// 由 `BASEMENT_ENTRANCE_PROB` 定，所以主入口层的户只有一小截剩得下。
     pub fn expected_trips(&self) -> usize {
-        let riders = self
-            .building
-            .total_residents()
-            .saturating_sub(self.building.residents_at(LOBBY));
-        (riders as f64 * self.traffic.departure_ratio as f64) as usize
+        let b = &self.building;
+        let dep = self.traffic.departure_ratio as f64;
+        let rev = self.traffic.reverse_ratio as f64;
+        let per_party = b.persons_per_unit.round().clamp(1.0, 4.0) as f64;
+        let units: f64 = (1..=b.highest_level()).map(|l| b.units_at(l) as f64).sum();
+        // 入口层落回主入口层的概率。落回时主入口层住户的团走零长度行程，
+        // 生成阶段被丢掉。有地下层才有抽到车库的可能，没有就全落回主入口层
+        let p_lobby_entrance = if b.basement_levels > 0 {
+            1.0 - BASEMENT_ENTRANCE_PROB
+        } else {
+            1.0
+        };
+        let lobby_units = b.units_at(LOBBY) as f64;
+        let riders = (units - lobby_units * p_lobby_entrance).max(0.0);
+        // 反向细流是在「这一户已经有人出门」之后再掷的，不是每户独立掷一次，
+        // 所以是 dep*(1+rev)，不是 dep+rev。写成后者在低出行率下会高估
+        (riders * per_party * dep * (1.0 + rev)) as usize
     }
 }
 
@@ -1133,7 +1220,12 @@ pub fn preset(name: &str) -> Option<Config> {
         "std_underserved" => set(&mut c, 33, 4, 1),
         "stress_gaming" => {
             set(&mut c, 33, 6, 2);
-            c.strategy = StrategyMix { honest: 0.7, press_both: 0.25, press_up_only: 0.05, multi_call: 0.0 };
+            c.strategy = StrategyMix {
+                honest: 0.7,
+                press_both: 0.25,
+                press_up_only: 0.05,
+                multi_call: 0.0,
+            };
         }
         "stress_stalled_car" => {
             set(&mut c, 33, 8, 1);
@@ -1183,7 +1275,11 @@ mod tests {
     #[test]
     fn default_config_is_valid() {
         let v = Config::default().validate();
-        assert!(v.is_ok(), "默认配置应当合法，实际 {:?}", v.errors().collect::<Vec<_>>());
+        assert!(
+            v.is_ok(),
+            "默认配置应当合法，实际 {:?}",
+            v.errors().collect::<Vec<_>>()
+        );
     }
 
     /// 红线 5：层数、户数、户均人数不是三个自由变量。
@@ -1311,7 +1407,11 @@ mod tests {
     #[test]
     fn stair_cost_matches_doc() {
         let s = Stairs::default();
-        assert!((s.cost_down(2) - 19.0).abs() < 1e-9, "两层应为 19 秒，实际 {}", s.cost_down(2));
+        assert!(
+            (s.cost_down(2) - 19.0).abs() < 1e-9,
+            "两层应为 19 秒，实际 {}",
+            s.cost_down(2)
+        );
         // 十层以上基本没人走，因为下行加费力已超过 70 秒
         assert!(s.cost_down(10) > 70.0);
         // 上行明显更难受
@@ -1338,7 +1438,10 @@ mod tests {
         let b = Boarding::default();
         let fresh = b.accept_prob(0.95, 0.8, 20.0);
         let tired = b.accept_prob(0.95, 0.8, 300.0);
-        assert!(tired > fresh, "等久了更可能挤上去，fresh={fresh} tired={tired}");
+        assert!(
+            tired > fresh,
+            "等久了更可能挤上去，fresh={fresh} tired={tired}"
+        );
     }
 
     #[test]
@@ -1347,18 +1450,30 @@ mod tests {
         for _ in 0..100 {
             assert_eq!(all_honest.pick(0.99), Strategy::Honest);
         }
-        let half = StrategyMix { honest: 0.5, press_both: 0.5, ..Default::default() };
+        let half = StrategyMix {
+            honest: 0.5,
+            press_both: 0.5,
+            ..Default::default()
+        };
         assert_eq!(half.pick(0.1), Strategy::Honest);
         assert_eq!(half.pick(0.9), Strategy::PressBoth);
         // 比例未归一化也能用。honest 占 0.7，所以 u=0.5 落在诚实区间
-        let unnormalized = StrategyMix { honest: 7.0, press_both: 3.0, ..Default::default() };
+        let unnormalized = StrategyMix {
+            honest: 7.0,
+            press_both: 3.0,
+            ..Default::default()
+        };
         assert_eq!(unnormalized.pick(0.5), Strategy::Honest);
         assert_eq!(unnormalized.pick(0.9), Strategy::PressBoth);
     }
 
     #[test]
     fn strategy_mix_normalizes() {
-        let m = StrategyMix { honest: 2.0, press_both: 2.0, ..Default::default() };
+        let m = StrategyMix {
+            honest: 2.0,
+            press_both: 2.0,
+            ..Default::default()
+        };
         let n = m.normalized();
         assert!((n.iter().sum::<f64>() - 1.0).abs() < 1e-12);
         assert!((n[0] - 0.5).abs() < 1e-12);
@@ -1382,19 +1497,27 @@ mod tests {
         for name in preset_names() {
             let c = preset(name).unwrap();
             let v = c.validate();
-            assert!(v.is_ok(), "预设 {name} 不合法：{:?}", v.errors().collect::<Vec<_>>());
+            assert!(
+                v.is_ok(),
+                "预设 {name} 不合法：{:?}",
+                v.errors().collect::<Vec<_>>()
+            );
         }
     }
 
     #[test]
     fn expected_trips_scales_with_population() {
         let c = preset("std_tall").unwrap();
-        // 层号 1 到 33 都住人，每层 round(6 × 2.8) = 17 人。主入口层的人在
-        // 出门时抬脚就到，不产生行程，所以要扣掉。
+        // 层号 1 到 33 都住人，每层 round(6 × 2.8) = 17 人，主入口层也是住宅层。
+        // 团人数是 round(2.8) = 3。没有地下层时入口全落回主入口层，主入口层
+        // 那 6 户的零长度团会被生成阶段丢掉，其余 33×6-6 户都算数。反向细流
+        // 与主客流同权重，一起进公式。
         assert_eq!(c.building.residents_at(1), 17, "主入口层住人，也是住宅层");
         assert_eq!(c.building.residents_at(2), 17);
         assert_eq!(c.building.total_residents(), 33 * 17);
-        assert_eq!(c.expected_trips(), (32.0 * 17.0 * 0.66) as usize);
+        assert_eq!(c.building.basement_levels, 0);
+        let riders = 33.0 * 6.0 - 6.0;
+        assert_eq!(c.expected_trips(), (riders * 3.0 * 0.66 * 1.08) as usize);
     }
 
     /// 配置往返 JSON 必须一模一样。网页传的就是这份 JSON，
@@ -1410,8 +1533,12 @@ mod tests {
         c.cars[0].initial_level = -1;
         c.overload.enabled = true;
         c.call_surface = CallSurface::PerCarPanel;
-        c.strategy =
-            StrategyMix { honest: 0.5, press_both: 0.3, press_up_only: 0.1, multi_call: 0.1 };
+        c.strategy = StrategyMix {
+            honest: 0.5,
+            press_both: 0.3,
+            press_up_only: 0.1,
+            multi_call: 0.1,
+        };
 
         let a = serde_json::to_string(&c).unwrap();
         let back: Config = serde_json::from_str(&a).unwrap();
@@ -1423,11 +1550,15 @@ mod tests {
     #[cfg(feature = "serde")]
     #[test]
     fn partial_json_falls_back_to_defaults() {
-        let j = r#"{"building":{"top_level":7,"units_per_floor":[0,4,4,4,4,4,4]},"sim":{"seed":5}}"#;
+        let j =
+            r#"{"building":{"top_level":7,"units_per_floor":[0,4,4,4,4,4,4]},"sim":{"seed":5}}"#;
         let c: Config = serde_json::from_str(j).unwrap();
         assert_eq!(c.building.top_level, 7);
         assert_eq!(c.sim.seed, 5);
-        assert!((c.building.floor_height - 3.0).abs() < 1e-6, "没给的字段应当走默认值");
+        assert!(
+            (c.building.floor_height - 3.0).abs() < 1e-6,
+            "没给的字段应当走默认值"
+        );
         assert_eq!(c.cars.len(), 2, "没给轿厢表时应当有两台默认轿厢");
     }
 }

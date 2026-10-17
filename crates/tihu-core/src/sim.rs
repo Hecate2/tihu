@@ -14,7 +14,9 @@ use crate::config::{Boarding as BoardCfg, CallSurface, Config, Strategy};
 use crate::engine::{Call, CarPhase, Scratch, World};
 use crate::metrics::Metrics;
 use crate::motion::{decel_distance, state_at, time_at_distance, Dir};
-use crate::policy::{AdmitSample, Assigner, Boarding, CarId, HallCall, Leg, Router, SystemView, Verdict};
+use crate::policy::{
+    AdmitSample, Assigner, Boarding, CarId, HallCall, Leg, Router, SystemView, Verdict,
+};
 use crate::rng::{Stream, Streams};
 
 /// 制动反应时间，秒。司机（控制器）从接到指令到开始减速的滞后。
@@ -92,19 +94,31 @@ pub fn run<R: Router, A: Assigner, B: Boarding>(
         if w.pax[pid].used_stairs || w.pax[pid].t_exit > 0.0 {
             continue;
         }
-        heap.push(Ev { at: w.pax[pid].t_arrive, seq, kind: Kind::Arrive(pid) });
+        heap.push(Ev {
+            at: w.pax[pid].t_arrive,
+            seq,
+            kind: Kind::Arrive(pid),
+        });
         seq += 1;
         // 等得不耐烦的兜底：到点还没上车就改走楼梯
         let patience = w.pax[pid].patience_s;
         if patience.is_finite() && patience > 0.0 {
             w.pax[pid].abandon_at = w.pax[pid].t_arrive + patience;
-            heap.push(Ev { at: w.pax[pid].t_arrive + patience, seq, kind: Kind::Abandon(pid) });
+            heap.push(Ev {
+                at: w.pax[pid].t_arrive + patience,
+                seq,
+                kind: Kind::Abandon(pid),
+            });
             seq += 1;
         }
     }
     // 轿厢起步
     for id in 0..w.cars.len() {
-        heap.push(Ev { at: 0.0, seq, kind: Kind::CarStep(id) });
+        heap.push(Ev {
+            at: 0.0,
+            seq,
+            kind: Kind::CarStep(id),
+        });
         seq += 1;
     }
 
@@ -129,7 +143,11 @@ pub fn run<R: Router, A: Assigner, B: Boarding>(
                 if w.pax[pid].t_arrive > w.now + 1e-9 {
                     // 事件排在更早的时刻，重新排一次
                     let at = w.pax[pid].t_arrive;
-                    heap.push(Ev { at, seq, kind: Kind::Arrive(pid) });
+                    heap.push(Ev {
+                        at,
+                        seq,
+                        kind: Kind::Arrive(pid),
+                    });
                     seq += 1;
                     continue;
                 }
@@ -159,15 +177,45 @@ pub fn run<R: Router, A: Assigner, B: Boarding>(
                         }
                     }
                 }
+                // 新来的等待者若超出归属车的停靠范围，就得叫醒别的、愿意停
+                // 这层的车来顺手接走（见 `waiting_rescue`）。归属车本来就
+                // 送得了时不用打扰它们，省得空车被反复叫醒又趴下
+                let to = w.pax[pid].to;
+                let wanted = if to > level { Dir::Up } else { Dir::Down };
+                let owner = w
+                    .calls
+                    .slots
+                    .get(Call::slot_index(level, wanted, w.basement))
+                    .copied()
+                    .flatten()
+                    .and_then(|cid| w.calls.get(cid))
+                    .and_then(|c| c.owner);
+                if let Some(o) = owner {
+                    if !w.car_serves(o, to) {
+                        wake_serving_idle(&mut w, level, Some(o), &mut heap, &mut seq);
+                    }
+                }
+                // 新外呼可能让归属需要重算，也可能让已经没人等的灯该灭
+                after_event(&mut w, assigner, &mut sv, &mut heap, &mut seq);
             }
 
             Kind::Abandon(pid) => {
                 abandon_to_stairs(&mut w, pid, &mut metrics);
+                // 最后一个等的人改走楼梯后，外呼得跟着灭，不然下一台车白停一次
+                after_event(&mut w, assigner, &mut sv, &mut heap, &mut seq);
             }
 
             Kind::CarStep(id) => {
                 step_car(
-                    &mut w, id, router, boarding, &mut sv, &mut heap, &mut seq, &mut rng, &mut metrics,
+                    &mut w,
+                    id,
+                    router,
+                    boarding,
+                    &mut sv,
+                    &mut heap,
+                    &mut seq,
+                    &mut rng,
+                    &mut metrics,
                 );
                 after_event(&mut w, assigner, &mut sv, &mut heap, &mut seq);
             }
@@ -178,7 +226,11 @@ pub fn run<R: Router, A: Assigner, B: Boarding>(
                 stall_seconds += res.seconds;
                 if !res.resumed {
                     let next = w.now + w.cfg.overload.stall_tick_s;
-                    heap.push(Ev { at: next, seq, kind: Kind::StallTick(id) });
+                    heap.push(Ev {
+                        at: next,
+                        seq,
+                        kind: Kind::StallTick(id),
+                    });
                     seq += 1;
                 }
                 after_event(&mut w, assigner, &mut sv, &mut heap, &mut seq);
@@ -262,6 +314,45 @@ fn waiting_for(w: &World, level: i16, dir: Dir) -> bool {
     })
 }
 
+/// 这一层有没有「归别人、但别人接不了」的人在等。
+///
+/// 共享外呼只归一台车。若等待者的目的层超出归属车的停靠范围（高低区共用
+/// 主入口层时就会这样），归属车送不了他，他也不会再有第二张外呼。这时
+/// 任何一台既停这一层、又能送他的车都该顺手接走，否则他会一直等下去。
+/// 只有归属车真的接不了时才出手，正常楼层不受影响。
+fn waiting_rescue(w: &World, id: CarId, here: i16) -> bool {
+    if here < -w.basement || here > w.top {
+        return false;
+    }
+    let want = board_dir_at(w, id, here);
+    for &p in &w.hall[w.qidx(here)] {
+        let px = &w.pax[p];
+        if !px.waiting() || !w.car_serves(id, px.to) {
+            continue;
+        }
+        let pdir = if px.to > here { Dir::Up } else { Dir::Down };
+        if want != Dir::None && want != pdir {
+            continue;
+        }
+        let slot = Call::slot_index(here, pdir, w.basement);
+        let owner = w
+            .calls
+            .slots
+            .get(slot)
+            .copied()
+            .flatten()
+            .and_then(|cid| w.calls.get(cid))
+            .and_then(|c| c.owner);
+        match owner {
+            // 有人负责，而且那台车送得了他：不抢
+            Some(o) if o != id && w.car_serves(o, px.to) => {}
+            // 没人负责、本来就是我的活，或归属车送不了：该我接
+            _ => return true,
+        }
+    }
+    false
+}
+
 /// 这位乘客此刻是不是还在 `level` 层的电梯厅里等。
 fn in_hall(w: &World, pid: usize, level: i16) -> bool {
     if level < -w.basement || level > w.top {
@@ -318,7 +409,6 @@ fn abandon_to_stairs(w: &mut World, pid: usize, metrics: &mut Metrics) {
     metrics.by_floor[qi].stair_users += 1;
 }
 
-
 /// 按每条外呼的 owner 重建各轿厢的待办列表。
 ///
 /// 只挂还算数的外呼。共享看灯（槽位还指着它），独立看归属，
@@ -341,8 +431,14 @@ fn sync_assignments(w: &mut World) {
 /// 叫醒一台停在原地的轿厢。分配完新活之后调用。
 fn wake(w: &mut World, id: CarId, heap: &mut std::collections::BinaryHeap<Ev>, seq: &mut u64) {
     if w.cars[id].phase == CarPhase::Idle && !w.cars[id].next_event.is_finite() {
+        // 有新活，允许在同层重新开门，别被上一次收尾的压制挡住
+        w.cars[id].settled_level = None;
         w.cars[id].next_event = w.now;
-        heap.push(Ev { at: w.now, seq: *seq, kind: Kind::CarStep(id) });
+        heap.push(Ev {
+            at: w.now,
+            seq: *seq,
+            kind: Kind::CarStep(id),
+        });
         *seq += 1;
     }
 }
@@ -361,7 +457,13 @@ fn assign_unowned<A: Assigner>(
         .calls
         .iter()
         .filter(|c| c.owner.is_none() && !w.calls.slots.is_empty() && is_live(w, c))
-        .map(|c| HallCall { id: c.id, level: c.level, dir: c.dir, owner: None, waiting: c.waiting })
+        .map(|c| HallCall {
+            id: c.id,
+            level: c.level,
+            dir: c.dir,
+            owner: None,
+            waiting: c.waiting,
+        })
         .collect();
     if unowned.is_empty() {
         return;
@@ -396,6 +498,27 @@ fn assign_unowned<A: Assigner>(
         sync_assignments(w);
         plan_for_moving(w, car, target.level, target.dir);
         wake(w, car, heap, seq);
+        // 同层可能还停着别的闲车，它送得了归属车送不了的等待者。
+        // 叫醒它，让它自己决定顺手接不接（在别的层会重新趴下，不白跑）
+        wake_serving_idle(w, target.level, Some(car), heap, seq);
+    }
+}
+
+/// 把愿意停这一层、又停在原地待命的轿厢叫醒。`except` 是已经处理过的那一台。
+///
+/// 停在这层的车会看自己要不要顺手接「归属车送不了」的等待者。停在别层的车
+/// 醒了也会因为没有名下活而重新趴下，不白跑。
+fn wake_serving_idle(
+    w: &mut World,
+    level: i16,
+    except: Option<CarId>,
+    heap: &mut std::collections::BinaryHeap<Ev>,
+    seq: &mut u64,
+) {
+    for other in 0..w.cars.len() {
+        if except != Some(other) && w.car_serves(other, level) {
+            wake(w, other, heap, seq);
+        }
     }
 }
 
@@ -452,7 +575,9 @@ fn kill_call(w: &mut World, level: i16, dir: Dir) {
         return;
     }
     let slot = Call::slot_index(level, dir, w.basement);
-    let Some(cid) = w.calls.slots.get(slot).copied().flatten() else { return };
+    let Some(cid) = w.calls.slots.get(slot).copied().flatten() else {
+        return;
+    };
     w.calls.clear_slot(level, dir);
     if let Some(c) = w.calls.get_mut(cid) {
         c.owner = None;
@@ -524,15 +649,15 @@ fn register_calls(w: &mut World, level: i16, newly: &[usize]) -> Vec<u32> {
                         // 车不服务这一层或已经卡死，就近换一台服务的，
                         // 与 assign_unowned 里那道兜底同一条。实在没车可换
                         // 就留成无主，等派梯捡走，总比出生即死锁强
-                        let owner = if w.car_serves(t, level) && w.cars[t].phase != CarPhase::Stalled
-                        {
-                            t
-                        } else {
-                            match w.serving_cars_least_busy(level).first() {
-                                Some(&alt) => alt,
-                                None => continue,
-                            }
-                        };
+                        let owner =
+                            if w.car_serves(t, level) && w.cars[t].phase != CarPhase::Stalled {
+                                t
+                            } else {
+                                match w.serving_cars_least_busy(level).first() {
+                                    Some(&alt) => alt,
+                                    None => continue,
+                                }
+                            };
                         if let Some(c) = w.calls.get_mut(id) {
                             c.owner = Some(owner);
                         }
@@ -660,7 +785,13 @@ fn step_car<R: Router, B: Boarding>(
                 // 想动这里，先给闲置有活的车补唤醒，再放宽这道门，顺序不能反
                 let has_free = w.cars[id].occupants.len() < w.cfg.cars[id].capacity_rated;
                 let someone = waiting_for(w, here, Dir::Up) || waiting_for(w, here, Dir::Down);
-                if owns_call_at(w, id, here) && has_free && someone {
+                // 刚在这一层收过尾就不要再开门。否则车没满又挤不上人时，
+                // 会在同一层反复空停靠，`choose_leg` 永远走不到，整台车卡死
+                let fresh = w.cars[id].settled_level != Some(here);
+                let own = owns_call_at(w, id, here) && someone;
+                // 归属车送不了的等待者，顺手接走，见 `waiting_rescue`
+                let rescue = waiting_rescue(w, id, here);
+                if fresh && has_free && (own || rescue) {
                     begin_stop(w, id, boarding, rng, heap, seq, metrics);
                     break;
                 }
@@ -682,7 +813,18 @@ fn step_car<R: Router, B: Boarding>(
 
             CarPhase::Moving => {
                 let here = w.cars[id].level.round() as i16;
-                if needs_stop(w, id, here) {
+                // 满载直驶：车已经满员，这一层只是要接同向的人，没人要在这里下，
+                // 停靠表里的这一站就作废，照直开过去。记一次，口径见 MODEL 9.3。
+                // 停不起的还有可能白停一次（幽灵），这一条把它变成有意义的直驶
+                let full = w.cars[id].occupants.len() >= w.cfg.cars[id].capacity_rated;
+                if full
+                    && !riders_alight_here(w, id, here)
+                    && w.cars[id].stops_planned.iter().any(|&(l, _)| l == here)
+                    && full_passes_call(w, id, here)
+                {
+                    w.cars[id].full_bypasses += 1;
+                    w.cars[id].stops_planned.retain(|&(l, _)| l != here);
+                } else if needs_stop(w, id, here) {
                     begin_stop(w, id, boarding, rng, heap, seq, metrics);
                     break;
                 }
@@ -722,11 +864,19 @@ fn step_car<R: Router, B: Boarding>(
         return;
     }
     if at > w.now {
-        heap.push(Ev { at, seq: *seq, kind: Kind::CarStep(id) });
+        heap.push(Ev {
+            at,
+            seq: *seq,
+            kind: Kind::CarStep(id),
+        });
         *seq += 1;
     } else {
         w.cars[id].next_event = w.now + 0.001;
-        heap.push(Ev { at: w.now + 0.001, seq: *seq, kind: Kind::CarStep(id) });
+        heap.push(Ev {
+            at: w.now + 0.001,
+            seq: *seq,
+            kind: Kind::CarStep(id),
+        });
         *seq += 1;
     }
 }
@@ -786,6 +936,8 @@ fn start_leg(w: &mut World, id: CarId, target: i16) -> bool {
     w.cars[id].leg_dist = dist;
     w.cars[id].dir = dir;
     w.cars[id].phase = CarPhase::Moving;
+    // 离开这一层，重开门的压制随之解除
+    w.cars[id].settled_level = None;
     // 车上没人时这一程算一趟往返的起点
     if w.cars[id].occupants.is_empty() && w.cars[id].trip_start == 0.0 {
         w.cars[id].trip_start = w.now;
@@ -826,6 +978,25 @@ fn plan_leg(w: &mut World, id: CarId, from: i16, target: i16, dir: Dir) {
     }
 }
 
+/// 这一层有没有一条「这台车方向上、还亮着」的外呼。
+///
+/// 只按车头方向找。反方向的外呼本来就不归它接，满载开过去不算直驶。
+fn full_passes_call(w: &World, id: CarId, here: i16) -> bool {
+    if !w.car_serves(id, here) {
+        return false;
+    }
+    let dir = w.cars[id].dir;
+    if !dir.is_moving() {
+        return false;
+    }
+    w.calls
+        .slots
+        .get(Call::slot_index(here, dir, w.basement))
+        .copied()
+        .flatten()
+        .is_some()
+}
+
 /// 车上有没有人正好要在这一层下。
 fn riders_alight_here(w: &World, id: CarId, level: i16) -> bool {
     w.cars[id].occupants.iter().any(|&p| w.pax[p].to == level)
@@ -852,7 +1023,11 @@ fn advance_leg(w: &mut World, id: CarId) {
     let target = w.cars[id].leg_target;
     // 削到目标层为止。宁可早一层到，也不要越过去之后漏排事件
     let raw = here + sign;
-    let next = if sign > 0 { raw.min(target) } else { raw.max(target) };
+    let next = if sign > 0 {
+        raw.min(target)
+    } else {
+        raw.max(target)
+    };
     if next == here {
         return;
     }
@@ -886,14 +1061,16 @@ fn begin_stop<B: Boarding>(
     //
     // 只灭「这层这个方向确实已经没人等」的那一条。无条件灭灯会把还没挤上
     // 的人的外呼一起掐掉，那些人从此不会有车再来，只能枯等。
+    //
+    // 独立面板的多呼叫按同一个判据：这一层这个方向还留得下人，就留灯。
+    // 车到站就无脑擦灯，会让满载到达时没挤上的人永远等不到下一趟，
+    // 与共享按键世界里「灯一直亮着等下一辆有位的车」的规矩对不上。
     for dir in [Dir::Up, Dir::Down] {
         if !waiting_for(w, lv, dir) {
             kill_call(w, lv, dir);
+            w.calls.clear_exclusive_owned_by(id, lv, dir);
         }
     }
-    // 独立面板下属于本车的呼叫：车到了，这一单就算应了，
-    // 有没有人上都不再留。留下来会变成下一次的幽灵循环
-    w.calls.clear_exclusive_owned_by(id, lv);
 
     let crush = w.cfg.boarding.capacity_crush(w.cfg.cars[id].capacity_rated);
     let _ = crush;
@@ -903,7 +1080,8 @@ fn begin_stop<B: Boarding>(
     // 保持开启每次停靠都付，与上下客时间相加，见 MODEL 3.6 的公式。
     // 少了这 1.5 秒，空停一次只有 4.5 秒，而估计函数按 6.0 算，
     // 乘客脑子里的信念和实际收费就对不上了
-    let total = base + doors.dwell_s as f64 + in_t + doors.close_s as f64 + doors.ctrl_resp_s as f64;
+    let total =
+        base + doors.dwell_s as f64 + in_t + doors.close_s as f64 + doors.ctrl_resp_s as f64;
     let close_at = w.cars[id].stop_started + total;
 
     // 幽灵停站：开门了却没人上、也没人下，白损失一次停靠开销
@@ -917,7 +1095,11 @@ fn begin_stop<B: Boarding>(
         w.cars[id].phase = CarPhase::Stalled;
         w.cars[id].stall_since = w.now;
         w.cars[id].next_event = f64::INFINITY;
-        heap.push(Ev { at: w.now + w.cfg.overload.stall_tick_s, seq: *seq, kind: Kind::StallTick(id) });
+        heap.push(Ev {
+            at: w.now + w.cfg.overload.stall_tick_s,
+            seq: *seq,
+            kind: Kind::StallTick(id),
+        });
         *seq += 1;
         return;
     }
@@ -931,6 +1113,8 @@ fn settle_stop(w: &mut World, id: CarId) {
     let lv = w.cars[id].level.round() as i16;
     w.cars[id].stops_planned.retain(|&(l, _)| l != lv);
     w.cars[id].stop_started = 0.0;
+    // 记下刚收尾的层，Idle 里据此压制原地重开门
+    w.cars[id].settled_level = Some(lv);
     // 车上清空才算一趟往返走完。只有真的有人下过车才记样本，
     // 否则单纯跑去接人又空手而归的腿也会被当成一趟
     if w.cars[id].occupants.is_empty() && w.cars[id].trip_start > 0.0 {
@@ -952,10 +1136,13 @@ fn settle_stop(w: &mut World, id: CarId) {
 /// 1. 停着不动（车头方向为空）时任何方向都收
 /// 2. 这一层名下有同向外呼，按车头方向收
 /// 3. 这一层名下只有反向外呼，说明这是本趟的折返点，按反方向收
-/// 4. 这一层没有外呼，只是路过或有人下车，按车头方向收
+/// 4. 这一层名下没有外呼，且车上已空，方向失去意义，两个方向都收
+/// 5. 这一层没有外呼，车还载着人，按车头方向收
 ///
 /// 第 3 条是早高峰的落点：轿厢空车上行到最高任务层，那里只有下行外呼，
 /// 要在这一层把下行客收上来，而不是按车头方向把上行客收走。
+/// 第 4 条是分区梯的落点：空车到站时车头还残留着上一段的方向，若按它收人，
+/// 归属别的车、但只有这台车送得了的等待者就永远接不走。
 fn board_dir_at(w: &World, id: CarId, here: i16) -> Dir {
     let d = w.cars[id].dir;
     if !d.is_moving() {
@@ -972,7 +1159,13 @@ fn board_dir_at(w: &World, id: CarId, here: i16) -> Dir {
         }
         opposite = Some(c.dir);
     }
-    opposite.unwrap_or(d)
+    if let Some(o) = opposite {
+        return o;
+    }
+    if w.cars[id].occupants.is_empty() {
+        return Dir::None;
+    }
+    d
 }
 
 /// 先下后上。下车的乘客如果还有下一条腿，在这里推进到下一腿。
@@ -1050,14 +1243,22 @@ fn board_and_alight<B: Boarding>(
             w.pax[pid].bypass_count = 0;
             w.pax[pid].declined_count = 0;
             w.pax[pid].no_space_count = 0;
-            heap.push(Ev { at, seq: *seq, kind: Kind::Arrive(pid) });
+            heap.push(Ev {
+                at,
+                seq: *seq,
+                kind: Kind::Arrive(pid),
+            });
             *seq += 1;
             // 第二条腿给一个完整的新耐心窗口。第一条腿遗留的旧计时器
             // 还在堆里，它到点时按 abandon_at 认出过期，不会误赶人
             let patience = w.pax[pid].patience_s;
             if patience.is_finite() && patience > 0.0 {
                 w.pax[pid].abandon_at = at + patience;
-                heap.push(Ev { at: at + patience, seq: *seq, kind: Kind::Abandon(pid) });
+                heap.push(Ev {
+                    at: at + patience,
+                    seq: *seq,
+                    kind: Kind::Abandon(pid),
+                });
                 *seq += 1;
             }
         } else {
@@ -1072,6 +1273,7 @@ fn board_and_alight<B: Boarding>(
     // 第二轮的结果不可能比第一轮好。
     let want = board_dir_at(w, id, lv);
     let mut boarded = 0usize;
+    let mut served = Dir::None;
     let qi = w.qidx(lv);
     let n = w.hall[qi].len();
     for i in 0..n {
@@ -1081,8 +1283,14 @@ fn board_and_alight<B: Boarding>(
         if !w.pax[pid].waiting() {
             continue;
         }
+        let pdir = if w.pax[pid].to > lv {
+            Dir::Up
+        } else {
+            Dir::Down
+        };
         if try_board_one(w, id, lv, pid, want, boarding, now, rng) {
             boarded += 1;
+            served = pdir;
         }
     }
     w.cars[id].last_boarded = boarded;
@@ -1092,10 +1300,23 @@ fn board_and_alight<B: Boarding>(
         w.hall[qi].retain(|&p| w.pax[p].boarded_car.is_none());
     }
 
-    // 未满载就走，而层上还有人等，记一次不全载发车
+    // 未满载就走，而层上还有人等，记一次不全载发车。
+    //
+    // 只看车这一趟实际收的那个方向。空车到站时 `want` 是 `Dir::None`，若拿它
+    // 当判据，反方向留着的人也会算进「没挤上」，把指标灌水。收的是哪边走就
+    // 数哪边，两个方向都收过就都算。
     let rated = w.cfg.cars[id].capacity_rated;
-    if boarded > 0 && w.cars[id].occupants.len() < rated && waiting_for(w, lv, want) {
-        w.cars[id].partial_departures += 1;
+    if boarded > 0 && w.cars[id].occupants.len() < rated {
+        let dirs: &[Dir] = if want.is_moving() {
+            &[want]
+        } else if served.is_moving() {
+            &[served]
+        } else {
+            &[]
+        };
+        if dirs.iter().any(|&d| waiting_for(w, lv, d)) {
+            w.cars[id].partial_departures += 1;
+        }
     }
 }
 
@@ -1175,7 +1396,10 @@ fn try_board_one<B: Boarding>(
             // 千克上限管的是真装不下，人数上限管的是真挤不进去。乘客自己看不到
             // 重量，他只知道自己是不是被夹住了，所以上面的心理判据一路按人数走，
             // 这一步才看载重
-            let load_crush = w.cfg.boarding.load_crush_kg(w.cfg.cars[id].rated_load_kg as f64);
+            let load_crush = w
+                .cfg
+                .boarding
+                .load_crush_kg(w.cfg.cars[id].rated_load_kg as f64);
             if w.cars[id].load_kg + w.pax[pid].weight > load_crush + 1e-9 {
                 w.pax[pid].no_space_count += 1;
                 w.pax[pid].bypass_count += 1;
@@ -1191,7 +1415,10 @@ fn try_board_one<B: Boarding>(
             w.pax[pid].boarded_car = Some(id);
             w.pax[pid].t_board = now;
             // 反向叫梯的人登记转向层，一路坐到折返点再下来
-            if matches!(w.pax[pid].strategy, Strategy::PressUpOnly | Strategy::PressBoth) {
+            if matches!(
+                w.pax[pid].strategy,
+                Strategy::PressUpOnly | Strategy::PressBoth
+            ) {
                 w.pax[pid].reversal_floor = Some(lv);
             }
             true
@@ -1236,8 +1463,14 @@ fn stall_tick(
     let n = w.cars[id].occupants.len();
     for k in 0..n {
         let pos = n - 1 - k;
-        let Some(&pid) = w.cars[id].occupants.get(pos) else { continue };
-        let q = if Some(pid) == last_boarder { ov.q_last * pressure } else { ov.q_other * pressure };
+        let Some(&pid) = w.cars[id].occupants.get(pos) else {
+            continue;
+        };
+        let q = if Some(pid) == last_boarder {
+            ov.q_last * pressure
+        } else {
+            ov.q_other * pressure
+        };
         if rng.chance(Stream::Stall, q) {
             exited = Some((pos, pid));
             break;
@@ -1260,12 +1493,24 @@ fn stall_tick(
         w.cars[id].phase = CarPhase::Idle;
         w.cars[id].stall_since = 0.0;
         w.cars[id].next_event = w.now;
-        heap.push(Ev { at: w.now, seq: *seq, kind: Kind::CarStep(id) });
+        heap.push(Ev {
+            at: w.now,
+            seq: *seq,
+            kind: Kind::CarStep(id),
+        });
         *seq += 1;
-        return StallOutcome { resumed: true, seconds, stalls_here: 1 };
+        return StallOutcome {
+            resumed: true,
+            seconds,
+            stalls_here: 1,
+        };
     }
 
-    StallOutcome { resumed: false, seconds: 0.0, stalls_here: 0 }
+    StallOutcome {
+        resumed: false,
+        seconds: 0.0,
+        stalls_here: 0,
+    }
 }
 
 /// 把一位乘客从轿厢里请出来，让他重新排队。
@@ -1301,13 +1546,21 @@ fn requeue_after_stall(
         w.hall[qi].push(pid);
     }
     // 重新进场，外呼会在那一刻重新登记
-    heap.push(Ev { at: w.now, seq: *seq, kind: Kind::Arrive(pid) });
+    heap.push(Ev {
+        at: w.now,
+        seq: *seq,
+        kind: Kind::Arrive(pid),
+    });
     *seq += 1;
     // 重新给一个完整的耐心窗口，否则他会立刻触发已经过期的弃梯事件。
     // 旧事件还躺在堆里，到点按 abandon_at 认出过期，不会误伤
     if patience.is_finite() && patience > 0.0 {
         w.pax[pid].abandon_at = w.now + patience;
-        heap.push(Ev { at: w.now + patience, seq: *seq, kind: Kind::Abandon(pid) });
+        heap.push(Ev {
+            at: w.now + patience,
+            seq: *seq,
+            kind: Kind::Abandon(pid),
+        });
         *seq += 1;
     }
 }
@@ -1365,6 +1618,7 @@ fn collect(w: &World, stalls: usize, stall_seconds: f64, mut m: Metrics) -> Metr
         m.ghost_stops += c.ghost_stops as usize;
         m.partial_departures += c.partial_departures as usize;
         m.overshoots += c.overshoots as usize;
+        m.full_bypasses += c.full_bypasses as usize;
     }
     if m.rtt_count > 0 {
         m.rtt_mean = m.rtt_sum / m.rtt_count as f64;
@@ -1377,7 +1631,9 @@ pub fn default_run(cfg: Config) -> Run {
     let mut router = DownPeakSweep;
     let mut assigner = crate::builtin::LoadAwareEta::default();
     // 上下客规则按配置走，不能用写死的默认值，否则调参拧不动拒挤曲线
-    let boarding = DefaultBoarding { cfg: cfg.boarding.clone() };
+    let boarding = DefaultBoarding {
+        cfg: cfg.boarding.clone(),
+    };
     run(cfg, &mut router, &mut assigner, &boarding)
 }
 
@@ -1436,6 +1692,96 @@ mod tests {
         );
     }
 
+    /// 红线 2 回归：独立面板同时呼叫多台，擦灯不能把没挤上的人一起扔掉。
+    ///
+    /// 旧写法是车一到站就无条件擦本车的独立呼叫。满载到达时没挤上的人
+    /// 从此没有车再来，只能枯等。改成「这层这个方向还留得下人就不擦」。
+    #[test]
+    fn multi_call_does_not_strand_left_behind_waiters() {
+        let mut c = Config::default();
+        c.building.top_level = 33;
+        c.building.units_per_floor = vec![6; 33];
+        c.building.ground_floor_residential = true;
+        let mut car = CarSpec::default();
+        car.capacity_rated = 10;
+        c.cars = vec![car.clone(), car];
+        c.traffic.pattern = crate::config::Pattern::MorningDown;
+        c.traffic.departure_ratio = 0.6;
+        c.call_surface = CallSurface::PerCarPanel;
+        c.strategy = StrategyMix {
+            honest: 0.0,
+            press_both: 0.0,
+            press_up_only: 0.0,
+            multi_call: 1.0,
+        };
+        c.stairs.enabled = false;
+        c.sim.horizon_s = 20_000.0;
+        let r = quick(c, 1);
+        let stranded = r
+            .world
+            .pax
+            .iter()
+            .filter(|p| p.hops_done == 0 && !p.used_stairs && !p.abandoned)
+            .count();
+        assert_eq!(stranded, 0, "多呼叫场景还有 {stranded} 人永远等不到车");
+    }
+
+    /// 分区梯回归：等待者超出归属车的停靠范围时，另一台车要能顺手接走。
+    ///
+    /// 高低区两台车共用主入口层外呼，外呼归了低区车，但高区等待者低区车
+    /// 送不了。修好之前低区车会停在原地反复开门（活锁），高区那一半人永远
+    /// 上不了车。见问题 2 的记录。
+    #[test]
+    fn zoned_cars_pick_up_each_others_unservable_waiters() {
+        use crate::config::StopSpec;
+        let mut c = Config::default();
+        c.building.top_level = 33;
+        c.building.units_per_floor = vec![6; 33];
+        c.building.ground_floor_residential = true;
+        let low: Vec<i16> = std::iter::once(1).chain(2..=17).collect();
+        let high: Vec<i16> = std::iter::once(1).chain(18..=33).collect();
+        let mut c0 = CarSpec::default();
+        c0.stops = StopSpec::list(low);
+        let mut c1 = CarSpec::default();
+        c1.stops = StopSpec::list(high);
+        c.cars = vec![c0, c1];
+        c.traffic.pattern = crate::config::Pattern::MorningDown;
+        c.traffic.departure_ratio = 0.6;
+        c.stairs.enabled = false;
+        c.sim.horizon_s = 20_000.0;
+        let r = quick(c, 1);
+        let stranded = r
+            .world
+            .pax
+            .iter()
+            .filter(|p| p.hops_done == 0 && !p.used_stairs && !p.abandoned)
+            .count();
+        assert_eq!(stranded, 0, "分区梯还有 {stranded} 人永远等不到车");
+    }
+
+    /// 满载直驶：一台电梯被挤满时，路过同向外呼不再白停，计入 `full_bypasses`。
+    ///
+    /// 修好之前这台车会在满载时照样停靠，开门没人上得去，全算成幽灵停站。
+    #[test]
+    fn full_car_skips_hall_calls_and_counts_them() {
+        let mut c = Config::default();
+        c.building.top_level = 18;
+        c.building.units_per_floor = vec![4; 18];
+        c.building.ground_floor_residential = true;
+        c.cars = vec![CarSpec::default()];
+        c.traffic.pattern = crate::config::Pattern::MorningDown;
+        c.traffic.departure_ratio = 0.95;
+        c.stairs.enabled = false;
+        let mut bypasses = 0usize;
+        for seed in 1..=3 {
+            bypasses += quick(c.clone(), seed).metrics.full_bypasses;
+        }
+        assert!(
+            bypasses > 0,
+            "满载的单梯早高峰应当出现满载直驶，实际 {bypasses}"
+        );
+    }
+
     /// 停靠语义：轿厢不会路过有人要下的楼层。
     ///
     /// 这是重写前最严重的 bug：轿厢点对点跳到目标层，中途该停的层全被掠过。
@@ -1447,7 +1793,10 @@ mod tests {
         // 每位下过车的人，出梯层就是他登记的目的层
         for p in &r.world.pax {
             if p.t_exit > 0.0 && !p.used_stairs {
-                assert!(p.to <= r.world.top && p.to >= -r.world.basement, "目的层越界");
+                assert!(
+                    p.to <= r.world.top && p.to >= -r.world.basement,
+                    "目的层越界"
+                );
             }
         }
         assert!(r.metrics.ride.count > 0, "该有人真坐到过目的地");
@@ -1496,7 +1845,11 @@ mod tests {
         // 车跑起来之后有人按 2 层：t=2.5 时车在 2.5 米处速度 2.0，
         // 剩 0.5 米不够刹停（要 3.3 米），真刹不住
         w.now = 2.5;
-        assert_eq!(brake_check(&w, 0, 2), Brake::Overshoot, "高速车跑起来刹不住 2 层");
+        assert_eq!(
+            brake_check(&w, 0, 2),
+            Brake::Overshoot,
+            "高速车跑起来刹不住 2 层"
+        );
         let before = w.cars[0].overshoots;
         plan_for_moving(&mut w, 0, 2, Dir::Up);
         assert_eq!(w.cars[0].overshoots, before + 1, "真刹不住要记一次越站");
@@ -1553,7 +1906,15 @@ mod tests {
         let mut metrics = Metrics::with_floors(w.n_levels);
         let mut rng = Streams::new(7);
         let boarding = DefaultBoarding::default();
-        begin_stop(&mut w, 0, &boarding, &mut rng, &mut heap, &mut seq, &mut metrics);
+        begin_stop(
+            &mut w,
+            0,
+            &boarding,
+            &mut rng,
+            &mut heap,
+            &mut seq,
+            &mut metrics,
+        );
         let cost = w.cars[0].next_event - 100.0;
         assert!((cost - 6.0).abs() < 1e-6, "空停应为 6.0 秒，实际 {cost}");
     }
@@ -1572,7 +1933,15 @@ mod tests {
         let mut metrics = Metrics::with_floors(w.n_levels);
         let mut rng = Streams::new(7);
         let boarding = DefaultBoarding::default();
-        begin_stop(&mut w, 0, &boarding, &mut rng, &mut heap, &mut seq, &mut metrics);
+        begin_stop(
+            &mut w,
+            0,
+            &boarding,
+            &mut rng,
+            &mut heap,
+            &mut seq,
+            &mut metrics,
+        );
         let cost = w.cars[0].next_event - 100.0;
         assert!((cost - 6.8).abs() < 1e-6, "下 1 人应为 6.8 秒，实际 {cost}");
     }
@@ -1732,7 +2101,11 @@ mod tests {
         c.building.units_per_floor = vec![6; 18];
         c.traffic.pattern = crate::config::Pattern::EveningUp;
         let w = World::new(c);
-        let from_lobby = w.pax.iter().filter(|p| p.hops[0].from == crate::config::LOBBY).count();
+        let from_lobby = w
+            .pax
+            .iter()
+            .filter(|p| p.hops[0].from == crate::config::LOBBY)
+            .count();
         assert!(
             from_lobby * 2 > w.pax.len(),
             "晚高峰应当以主入口层出发为主，实际 {} / {}",
@@ -1779,7 +2152,10 @@ mod tests {
         let two_legged = w.pax.iter().filter(|p| p.n_hops == 2).count();
         assert!(two_legged > 0, "全都要返程时应当出现两条腿的乘客");
         assert!(
-            w.pax.iter().filter(|p| p.n_hops == 2).all(|p| p.hops[1].from == p.hops[0].to),
+            w.pax
+                .iter()
+                .filter(|p| p.n_hops == 2)
+                .all(|p| p.hops[1].from == p.hops[0].to),
             "第二条腿要从第一条腿的终点出发"
         );
         // 跑起来之后，返程的人真的会在目的层重新出现
@@ -1801,11 +2177,18 @@ mod tests {
         c.traffic.departure_ratio = 1.0;
         c.sim.horizon_s = 7200.0;
         let r = default_run(c);
-        assert!(r.metrics.abandoned > 0, "这种配置下应当有人等不下去改走楼梯");
+        assert!(
+            r.metrics.abandoned > 0,
+            "这种配置下应当有人等不下去改走楼梯"
+        );
         let walkers = r.world.pax.iter().filter(|p| p.abandoned).count();
         assert_eq!(walkers, r.metrics.abandoned);
         assert!(
-            r.world.pax.iter().filter(|p| p.abandoned).all(|p| !p.used_stairs),
+            r.world
+                .pax
+                .iter()
+                .filter(|p| p.abandoned)
+                .all(|p| !p.used_stairs),
             "出发前就走楼梯的人不该同时被记成弃梯"
         );
     }
@@ -1979,7 +2362,11 @@ mod tests {
         let c = Config::default();
         let r = default_run(c);
         for p in &r.world.pax {
-            if p.hops_done > 0 && !p.used_stairs && !p.abandoned && p.t_board > 0.0 && p.t_exit > 0.0
+            if p.hops_done > 0
+                && !p.used_stairs
+                && !p.abandoned
+                && p.t_board > 0.0
+                && p.t_exit > 0.0
             {
                 assert!(
                     p.door_to_door() + 1e-9 >= p.wait(),
@@ -2006,8 +2393,14 @@ mod tests {
             sum += f.d2d_sum;
             n += f.d2d_samples.count;
         }
-        assert!((sum - r.metrics.door_to_door.sum).abs() < 1e-6, "各层门到门之和对不上全局");
-        assert_eq!(n, r.metrics.door_to_door.count, "各层门到门样本数对不上全局");
+        assert!(
+            (sum - r.metrics.door_to_door.sum).abs() < 1e-6,
+            "各层门到门之和对不上全局"
+        );
+        assert_eq!(
+            n, r.metrics.door_to_door.count,
+            "各层门到门样本数对不上全局"
+        );
     }
 
     /// 红线 2：独立面板下同时呼叫多台，两台车都来，第一台上人，
@@ -2088,11 +2481,17 @@ mod tests {
         let mut seq = 0u64;
         requeue_after_stall(&mut w, 0, pid, &mut heap, &mut seq);
 
-        assert_eq!(w.pax[pid].t_exit, 0.0, "被请下车的人一步都没到目的地，不算到达");
+        assert_eq!(
+            w.pax[pid].t_exit, 0.0,
+            "被请下车的人一步都没到目的地，不算到达"
+        );
         assert_eq!(w.pax[pid].t_board, 0.0, "上梯记录要清掉，等待重新累计");
         assert!(w.pax[pid].boarded_car.is_none());
         assert!(w.pax[pid].requeued_after_stall);
-        assert!(w.hall[w.qidx(from)].contains(&pid), "要回到出发层的电梯厅排队");
+        assert!(
+            w.hall[w.qidx(from)].contains(&pid),
+            "要回到出发层的电梯厅排队"
+        );
         assert!(!heap.is_empty(), "要排一次重新进场的事件，否则没人再管他");
         assert_eq!(w.cars[0].occupants.len(), 0);
         assert!(w.cars[0].load_kg.abs() < 1e-9, "载重要把这个人扣掉");
@@ -2106,7 +2505,10 @@ mod tests {
         let mut w = World::new(small());
         let pid = 0;
         let from = w.pax[pid].from;
-        let cap = w.cfg.boarding.load_crush_kg(w.cfg.cars[0].rated_load_kg as f64);
+        let cap = w
+            .cfg
+            .boarding
+            .load_crush_kg(w.cfg.cars[0].rated_load_kg as f64);
         // 车停在出发点，已经压在载重上限上
         w.cars[0].level = from as f32;
         w.cars[0].load_kg = cap;
@@ -2118,7 +2520,9 @@ mod tests {
 
         let mut rng = Streams::new(7);
         // 按这个世界自己的配置构造判据，不用写死的默认值
-        let boarding = DefaultBoarding { cfg: w.cfg.boarding.clone() };
+        let boarding = DefaultBoarding {
+            cfg: w.cfg.boarding.clone(),
+        };
         let ok = try_board_one(&mut w, 0, from, pid, Dir::None, &boarding, 0.0, &mut rng);
         assert!(!ok, "载重到顶就不该再放人进来");
         assert_eq!(w.pax[pid].no_space_count, 1, "这是装不下，不是不愿意挤");
@@ -2149,8 +2553,17 @@ mod tests {
         // 绕一次场景，确认没有别处偷偷重抽体重
         let mut c = small();
         c.traffic.return_ratio = 1.0;
-        let before: Vec<u64> = World::new(c.clone()).pax.iter().map(|p| p.weight.to_bits()).collect();
-        let after: Vec<u64> = default_run(c).world.pax.iter().map(|p| p.weight.to_bits()).collect();
+        let before: Vec<u64> = World::new(c.clone())
+            .pax
+            .iter()
+            .map(|p| p.weight.to_bits())
+            .collect();
+        let after: Vec<u64> = default_run(c)
+            .world
+            .pax
+            .iter()
+            .map(|p| p.weight.to_bits())
+            .collect();
         assert_eq!(before, after, "体重在跑完之后必须与生成时逐位一致");
     }
 
@@ -2188,7 +2601,11 @@ mod tests {
         c.traffic.pattern = Pattern::InterFloor;
         c.traffic.departure_ratio = 0.5;
         c.traffic.flows = vec![Flow::new(3, 15, 0.6), Flow::new(15, 3, 0.4)];
-        assert!(c.validate().is_ok(), "{:?}", c.validate().errors().map(|i| i.code).collect::<Vec<_>>());
+        assert!(
+            c.validate().is_ok(),
+            "{:?}",
+            c.validate().errors().map(|i| i.code).collect::<Vec<_>>()
+        );
 
         let w = World::new(c.clone());
         assert!(w.pax.len() > 10, "层间客流应该造出人");
@@ -2218,9 +2635,17 @@ mod tests {
     #[test]
     fn hospital_preset_runs_between_upper_floors() {
         let c = crate::config::preset("hospital").unwrap();
-        assert!(c.validate().is_ok(), "{:?}", c.validate().errors().map(|i| i.code).collect::<Vec<_>>());
+        assert!(
+            c.validate().is_ok(),
+            "{:?}",
+            c.validate().errors().map(|i| i.code).collect::<Vec<_>>()
+        );
         let r = default_run(c);
-        assert!(r.metrics.pax_total > 50, "院楼该有几百段行程，实际 {}", r.metrics.pax_total);
+        assert!(
+            r.metrics.pax_total > 50,
+            "院楼该有几百段行程，实际 {}",
+            r.metrics.pax_total
+        );
         // 每一段的起终点都不在主入口层，这正是层间交通的样子
         for p in &r.world.pax {
             assert!(p.hops[0].from >= 2, "院楼的客流不该从主入口层出发");
@@ -2243,11 +2668,7 @@ mod tests {
         assert!(r.metrics.abandoned > 0, "这么挤的配置该有人弃梯");
         for p in r.world.pax.iter().filter(|p| p.abandoned) {
             let span = (p.hops[0].to - p.hops[0].from).abs();
-            assert!(
-                span <= 6,
-                "超过步层上限还弃梯了：{} 层跨度",
-                span
-            );
+            assert!(span <= 6, "超过步层上限还弃梯了：{} 层跨度", span);
         }
     }
 }

@@ -3,7 +3,7 @@
 //! 主循环见 `docs/ARCHITECTURE.md` 第 3 节。堆里只有「轿厢数加楼层数」个元素，
 //! 全部容器在进循环之前按配置推算的上界预分配，之后不再申请内存。
 
-use crate::config::{Config, LOBBY, Pattern, Strategy};
+use crate::config::{Config, Pattern, Strategy, LOBBY};
 use crate::motion::{traverse_time, Dir};
 use crate::policy::{CarBrief, CarId, HallCall, RunView, SystemView};
 use crate::rng::Stream;
@@ -159,12 +159,17 @@ pub struct Car {
     pub leg_dist: f64,
     /// 这条腿上已经预定要停的楼层。由外呼指派与制动可行性共同决定
     pub stops_planned: Vec<(i16, Dir)>,
+    /// 刚在哪一层收过尾。停靠完还停在这一层时，不许原地再开一次门，
+    /// 否则车满不了又走不掉，会在同一层反复空停靠卡死（分区梯的死锁就出在这）
+    pub settled_level: Option<i16>,
     /// 幽灵停站次数：开门了却没人上、也没人下
     pub ghost_stops: u32,
     /// 未满载就发车、而层上还有人等的停靠次数
     pub partial_departures: u32,
     /// 因为制动来不及而跳过的外呼层次数
     pub overshoots: u32,
+    /// 满载直驶次数：满员时路过一条还亮着的同向外呼却没停
+    pub full_bypasses: u32,
 }
 
 /// 一条登记在案的外呼。
@@ -240,7 +245,11 @@ impl Call {
 
 impl CallBoard {
     fn new(n_slots: usize, basement: i16) -> Self {
-        Self { slots: vec![None; n_slots], calls: Vec::new(), basement }
+        Self {
+            slots: vec![None; n_slots],
+            calls: Vec::new(),
+            basement,
+        }
     }
 
     #[inline]
@@ -255,10 +264,23 @@ impl CallBoard {
     ///
     /// 独立面板的多呼叫走另一条：同一个 `(楼层, 方向)` 可以并存两条外呼，
     /// 各属于一台车，不走槽位去重。红线 2 在这里与红线 1 分道。
-    pub fn register(&mut self, level: i16, dir: Dir, waiting: usize, exclusive: bool) -> (u32, bool) {
+    pub fn register(
+        &mut self,
+        level: i16,
+        dir: Dir,
+        waiting: usize,
+        exclusive: bool,
+    ) -> (u32, bool) {
         if exclusive {
             let id = self.calls.len() as u32;
-            self.calls.push(Call { id, level, dir, owner: None, waiting, exclusive: true });
+            self.calls.push(Call {
+                id,
+                level,
+                dir,
+                owner: None,
+                waiting,
+                exclusive: true,
+            });
             return (id, true);
         }
         let s = self.slot(level, dir);
@@ -267,19 +289,26 @@ impl CallBoard {
             return (id, false);
         }
         let id = self.calls.len() as u32;
-        self.calls.push(Call { id, level, dir, owner: None, waiting, exclusive });
+        self.calls.push(Call {
+            id,
+            level,
+            dir,
+            owner: None,
+            waiting,
+            exclusive,
+        });
         self.slots[s] = Some(id);
         (id, true)
     }
 
-    /// 到站消号：属于 `owner` 在 `level` 层的独立呼叫全部消号。
+    /// 到站消号：属于 `owner` 在 `level` 层、`dir` 方向的独立呼叫消号。
     ///
-    /// 车到了，这一单就算应了，有人没人都消。共享槽位不动，
+    /// 只在「这层这个方向确实没人再等」时由调用方触发。共享槽位不动，
     /// 别人的独立呼叫也不动。消号只清归属，记录本身保留，
     /// 外呼编号永不复用的约定不变。
-    pub fn clear_exclusive_owned_by(&mut self, owner: CarId, level: i16) {
+    pub fn clear_exclusive_owned_by(&mut self, owner: CarId, level: i16, dir: Dir) {
         for c in &mut self.calls {
-            if c.exclusive && c.level == level && c.owner == Some(owner) {
+            if c.exclusive && c.level == level && c.dir == dir && c.owner == Some(owner) {
                 c.owner = None;
             }
         }
@@ -327,7 +356,10 @@ impl World {
     pub fn new(cfg: Config) -> Self {
         // 空梯直接拦在这里，不然后面抽样深处索引越界，报错看不出原因。
         // 网页链路先过 validate() 到不了这里，直调内核的研究者看这条。
-        assert!(!cfg.cars.is_empty(), "至少要有一台轿厢，先跑 Config::validate");
+        assert!(
+            !cfg.cars.is_empty(),
+            "至少要有一台轿厢，先跑 Config::validate"
+        );
         let basement = cfg.building.basement_levels.max(0);
         let top = cfg.building.top_level;
         let n_levels = (top + basement + 1) as usize;
@@ -393,7 +425,9 @@ impl World {
                 dir: Dir::None,
                 phase: CarPhase::Idle,
                 next_event: f64::INFINITY,
-                occupants: Vec::with_capacity(self.cfg.boarding.capacity_crush(spec.capacity_rated) + 2),
+                occupants: Vec::with_capacity(
+                    self.cfg.boarding.capacity_crush(spec.capacity_rated) + 2,
+                ),
                 assigned: Vec::with_capacity(n_slots_for(&self.cfg)),
                 load_kg: 0.0,
                 last_boarded: 0,
@@ -409,9 +443,11 @@ impl World {
                 leg_start: 0.0,
                 leg_dist: 0.0,
                 stops_planned: Vec::with_capacity(n_levels * 2),
+                settled_level: None,
                 ghost_stops: 0,
                 partial_departures: 0,
                 overshoots: 0,
+                full_bypasses: 0,
             });
         }
     }
@@ -467,9 +503,7 @@ impl World {
                     // 出口层到住宅层。有一部分人从地下车库上楼回家
                     let ent = pick_entrance_level(&mut rng, &self.cfg.building);
                     let is_return = rng.chance(Stream::Demand, ret);
-                    self.emit_party(
-                        ent, level, size, t0, is_child, is_return, horizon, &mut rng,
-                    );
+                    self.emit_party(ent, level, size, t0, is_child, is_return, horizon, &mut rng);
                 }
                 // 反向细流。按户掷，不用「户数乘比例取整」，
                 // 否则小楼里那一撮人会被四舍五入抹成零
@@ -506,7 +540,9 @@ impl World {
         if total <= 0.0 {
             return;
         }
-        let parties = (self.cfg.building.total_residents() as f64 * dep).round().max(1.0) as usize;
+        let parties = (self.cfg.building.total_residents() as f64 * dep)
+            .round()
+            .max(1.0) as usize;
         for f in &flows {
             let n = ((parties as f64) * f.share.max(0.0) / total).round() as usize;
             for _ in 0..n {
@@ -540,7 +576,9 @@ impl World {
             return;
         }
         let stairs = &self.cfg.stairs;
-        let dwell = rng.lognormal(self.cfg.traffic.return_dwell_s.max(1.0), 0.5).max(30.0);
+        let dwell = rng
+            .lognormal(self.cfg.traffic.return_dwell_s.max(1.0), 0.5)
+            .max(30.0);
         let patience = if stairs.enabled && stairs.abandon_after_s > 0.0 {
             rng.lognormal(stairs.abandon_after_s, stairs.abandon_cv.max(0.01))
         } else {
@@ -548,7 +586,11 @@ impl World {
             f64::INFINITY
         };
         for k in 0..size {
-            let jitter = if k == 0 { 0.0 } else { rng.range(Stream::Arrival, 0.0, 90.0) };
+            let jitter = if k == 0 {
+                0.0
+            } else {
+                rng.range(Stream::Arrival, 0.0, 90.0)
+            };
             let t_arrive = (t0 + jitter).min(horizon);
             let tol = rng.tolerance();
             // 带小孩的同行团，尾部那几位走小孩体重那一峰，保证相关性
@@ -601,7 +643,11 @@ impl World {
             self.pax.push(pax);
             if use_stairs {
                 // 走楼梯的人不进电梯厅，但也留在 pax 里用于统计
-                let cost = if to < from { stairs.cost_down(from - to) } else { stairs.cost_up(to - from) };
+                let cost = if to < from {
+                    stairs.cost_down(from - to)
+                } else {
+                    stairs.cost_up(to - from)
+                };
                 self.pax[idx].t_board = t_arrive;
                 self.pax[idx].t_exit = t_arrive + cost;
                 self.pax[idx].hops_done = 1;
@@ -612,7 +658,10 @@ impl World {
 
     /// 钟形强度。把均匀分布压向中段，模拟高峰的集中。
     fn shape_intensity(&self, u: f64) -> f64 {
-        let (a, b) = (self.cfg.traffic.peak_alpha as f64, self.cfg.traffic.peak_beta as f64);
+        let (a, b) = (
+            self.cfg.traffic.peak_alpha as f64,
+            self.cfg.traffic.peak_beta as f64,
+        );
         let (mut lo, mut hi) = (0.0f64, 1.0f64);
         for _ in 0..24 {
             let mid = 0.5 * (lo + hi);
@@ -642,7 +691,11 @@ impl World {
             capacity: self.cfg.cars[id].capacity_rated,
             pending_calls: c.assigned.len(),
             stalled: c.phase == CarPhase::Stalled,
-            stall_for: if c.phase == CarPhase::Stalled { self.now - c.stall_since } else { 0.0 },
+            stall_for: if c.phase == CarPhase::Stalled {
+                self.now - c.stall_since
+            } else {
+                0.0
+            },
         }
     }
 
@@ -654,10 +707,17 @@ impl World {
         }
         sv.all.clear();
         for c in &self.calls.calls {
-            sv.all.push(HallCall { id: c.id, level: c.level, dir: c.dir, owner: c.owner, waiting: c.waiting });
+            sv.all.push(HallCall {
+                id: c.id,
+                level: c.level,
+                dir: c.dir,
+                owner: c.owner,
+                waiting: c.waiting,
+            });
         }
         sv.pending.clear();
-        sv.pending.extend(sv.all.iter().copied().filter(|c| c.owner.is_none()));
+        sv.pending
+            .extend(sv.all.iter().copied().filter(|c| c.owner.is_none()));
         sv.q.clear();
         for h in &self.hall {
             sv.q.push(h.len() as u32);
@@ -672,12 +732,19 @@ impl World {
         // 内选楼层由在梯乘客的目的层现算。早先有一个 Car::car_calls 字段，
         // 但从来没人往里写，于是 will_alight 对算法永远回答 false
         sv.car_calls.clear();
-        sv.car_calls.extend(car.occupants.iter().map(|&p| self.pax[p].to));
+        sv.car_calls
+            .extend(car.occupants.iter().map(|&p| self.pax[p].to));
         sv.car_calls.sort_unstable();
         sv.mine.clear();
         for cid in &car.assigned {
             if let Some(c) = self.calls.get(*cid) {
-                sv.mine.push(HallCall { id: c.id, level: c.level, dir: c.dir, owner: c.owner, waiting: c.waiting });
+                sv.mine.push(HallCall {
+                    id: c.id,
+                    level: c.level,
+                    dir: c.dir,
+                    owner: c.owner,
+                    waiting: c.waiting,
+                });
             }
         }
         RunView {
@@ -715,7 +782,7 @@ fn n_slots_for(cfg: &Config) -> usize {
 /// `docs/MODEL.md` 第 4.3 节的取值，待标定。
 fn pick_entrance_level(rng: &mut crate::rng::Streams, b: &crate::config::Building) -> i16 {
     let basements = b.basement_levels.max(0);
-    if basements > 0 && rng.chance(Stream::Demand, 0.07) {
+    if basements > 0 && rng.chance(Stream::Demand, crate::config::BASEMENT_ENTRANCE_PROB) {
         -1 - rng.below(Stream::Demand, basements.min(2) as u32) as i16
     } else {
         LOBBY
@@ -940,7 +1007,10 @@ mod tests {
                 .filter(|p| p.used_stairs && (p.to - p.from).abs() > 6)
                 .count();
         }
-        assert_eq!(long, 0, "晚高峰爬 6 层以上的人应当是零，实际 {long} / {total}");
+        assert_eq!(
+            long, 0,
+            "晚高峰爬 6 层以上的人应当是零，实际 {long} / {total}"
+        );
     }
 
     /// 同样的跨度，往上爬的意愿远低于往下走。
@@ -959,7 +1029,11 @@ mod tests {
         let mut cfg = preset_cfg();
         cfg.traffic.departure_ratio = 1.0;
         let w = World::new(cfg);
-        let low: usize = w.pax.iter().filter(|p| p.used_stairs && p.from <= 6).count();
+        let low: usize = w
+            .pax
+            .iter()
+            .filter(|p| p.used_stairs && p.from <= 6)
+            .count();
         let high: usize = w.pax.iter().filter(|p| p.used_stairs && p.from > 9).count();
         assert!(low > 0, "低层应当有人走楼梯");
         let total = w.pax.len().max(1) as f64;
@@ -1032,7 +1106,10 @@ mod tests {
         b.clear_slot(5, Dir::Down);
         let (id2, _) = b.register(5, Dir::Down, 1, false);
         assert_ne!(id1, id2, "旧编号不该被复用");
-        assert!(b.get(id1).is_some_and(|c| c.level == 5), "记录本身仍在，供指标统计");
+        assert!(
+            b.get(id1).is_some_and(|c| c.level == 5),
+            "记录本身仍在，供指标统计"
+        );
     }
 
     /// 同一个种子两次造世界，乘客完全一致。
