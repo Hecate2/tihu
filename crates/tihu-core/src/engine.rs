@@ -232,6 +232,17 @@ pub struct CallBoard {
 }
 
 impl Call {
+    /// 算法看到的形状。新增字段时只改这里，两个视图与派梯入口一起跟上
+    pub fn view(&self, waiting: usize) -> HallCall {
+        HallCall {
+            id: self.id,
+            level: self.level,
+            dir: self.dir,
+            owner: self.owner,
+            waiting,
+        }
+    }
+
     /// 外呼槽位的下标。
     ///
     /// 楼层 `level` 的队列下标是 `level + basement`。主入口是 1 层，
@@ -412,13 +423,11 @@ impl World {
         self.car_stops[id][(level + self.basement) as usize]
     }
 
-    /// 这一层有哪些轿厢愿意停，按 `assigned` 少的排前面。
-    pub fn serving_cars_least_busy(&self, level: i16) -> Vec<CarId> {
-        let mut ids: Vec<CarId> = (0..self.cars.len())
+    /// 这一层愿意停、又没卡死的最闲的一台。派梯兜底用，不分配内存
+    pub fn least_busy_serving(&self, level: i16) -> Option<CarId> {
+        (0..self.cars.len())
             .filter(|&i| self.car_serves(i, level) && self.cars[i].phase != CarPhase::Stalled)
-            .collect();
-        ids.sort_by_key(|&i| (self.cars[i].assigned.len(), i));
-        ids
+            .min_by_key(|&i| (self.cars[i].assigned.len(), i))
     }
 
     fn build_cars(&mut self) {
@@ -730,13 +739,7 @@ impl World {
             if !self.call_is_live(c) {
                 continue;
             }
-            sv.all.push(HallCall {
-                id: c.id,
-                level: c.level,
-                dir: c.dir,
-                owner: c.owner,
-                waiting: c.waiting,
-            });
+            sv.all.push(c.view(c.waiting));
         }
         sv.pending.clear();
         sv.pending
@@ -761,13 +764,7 @@ impl World {
         sv.mine.clear();
         for cid in &car.assigned {
             if let Some(c) = self.calls.get(*cid) {
-                sv.mine.push(HallCall {
-                    id: c.id,
-                    level: c.level,
-                    dir: c.dir,
-                    owner: c.owner,
-                    waiting: c.waiting,
-                });
+                sv.mine.push(c.view(c.waiting));
             }
         }
         RunView {

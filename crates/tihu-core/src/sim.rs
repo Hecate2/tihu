@@ -15,7 +15,7 @@ use crate::engine::{Call, CarPhase, Scratch, World};
 use crate::metrics::Metrics;
 use crate::motion::{decel_distance, state_at, time_at_distance, Dir};
 use crate::policy::{
-    AdmitSample, Assigner, Boarding, CarId, HallCall, Leg, Router, SystemView, Verdict,
+    AdmitSample, Assigner, Boarding, CarId, Leg, Router, SystemView, Verdict,
 };
 use crate::rng::{Stream, Streams};
 
@@ -176,13 +176,8 @@ pub fn run<R: Router, A: Assigner, B: Boarding>(
                 if !pre_owned.is_empty() {
                     sync_assignments(&mut w);
                     for cid in pre_owned {
-                        let hit = match w.calls.get(cid) {
-                            Some(c) => c.owner.map(|o| (o, c.level, c.dir)),
-                            None => None,
-                        };
-                        if let Some((owner, lv, dir)) = hit {
-                            plan_for_moving(&mut w, owner, lv, dir);
-                            wake(&mut w, owner, &mut heap, &mut seq);
+                        if let Some(owner) = w.calls.get(cid).and_then(|c| c.owner) {
+                            hand_off(&mut w, cid, owner, &mut heap, &mut seq);
                         }
                     }
                 }
@@ -304,20 +299,22 @@ fn after_event<A: Assigner>(
             w.calls.calls[i].owner = None;
             continue;
         }
-        let (level, dir) = (w.calls.calls[i].level, w.calls.calls[i].dir);
+        let level = w.calls.calls[i].level;
         // 内核兜底：改判的目标车得真能来接这一层，判据见 `car_can_serve`。
         // 算法把归属改到谁头上，内核都得替等梯的人守住这条底线。
         // `None` 是算法主动放手，保持无人负责，等下一次分配
         let owner = match *slot {
             Some(car) if car_can_serve(w, car, level) => Some(car),
-            Some(_) => w.serving_cars_least_busy(level).first().copied(),
+            Some(_) => w.least_busy_serving(level),
             None => None,
         };
-        w.calls.calls[i].owner = owner;
-        // 新车主可能正趴在原地，得叫醒。正在途中的顺手插一脚刹车
-        if let Some(car) = owner {
-            plan_for_moving(w, car, level, dir);
-            wake(w, car, heap, seq);
+        match owner {
+            // 新车主可能正趴在原地，得叫醒。正在途中的顺手插一脚刹车
+            Some(car) => {
+                let cid = w.calls.calls[i].id;
+                hand_off(w, cid, car, heap, seq);
+            }
+            None => w.calls.calls[i].owner = None,
         }
     }
     sync_assignments(w);
@@ -418,14 +415,11 @@ fn abandon_to_stairs(w: &mut World, pid: usize, metrics: &mut Metrics) {
     if in_hall(w, pid, level) {
         w.hall[qi].retain(|&p| p != pid);
     }
-    // 少了一个人等，外呼上记的人数跟着降。两个方向都刷一遍，
-    // 反向叫梯的人按的是另一个方向
+    // 少了一个人等，两个方向都要处理：外呼上记的人数跟着降，
+    // 要是这条外呼死在一台卡住的车上，顺手打上标记。
+    // 「已经没人等」这个条件把两条计数路径分开，一条外呼只记一次
     for dir in [Dir::Up, Dir::Down] {
         refresh_waiting(w, level, dir);
-    }
-    // 这条外呼要是死在一台卡住的车上，打上标记。判据要求这层这个方向
-    // 已经没人再等，与 `collect` 里「还有人等」那条互斥，一条外呼只记一次
-    for dir in [Dir::Up, Dir::Down] {
         if waiting_for(w, level, dir) {
             continue;
         }
@@ -468,7 +462,7 @@ fn sync_assignments(w: &mut World) {
     }
     for c in &w.calls.calls {
         let Some(owner) = c.owner else { continue };
-        if !call_is_live(w, c) {
+        if !w.call_is_live(c) {
             continue;
         }
         if owner < w.cars.len() {
@@ -484,6 +478,28 @@ fn sync_assignments(w: &mut World) {
 /// 内核都要换一台车，不能把外呼挂上去，也不能直接崩。
 fn car_can_serve(w: &World, car: CarId, level: i16) -> bool {
     car < w.cars.len() && w.car_serves(car, level) && w.cars[car].phase != CarPhase::Stalled
+}
+
+/// 把一条外呼记到一台车名下，并让它动起来。
+///
+/// 派梯有三个入口：新外呼派梯、改判写回、独立面板出生带主。三处都要做
+/// 「改归属、插停靠、叫醒」这三件事，少一步车就不知道有活。集中在一处，
+/// 免得三份各写一遍再慢慢漂移。待办列表由调用方在合适的时候同步
+fn hand_off(
+    w: &mut World,
+    cid: u32,
+    car: CarId,
+    heap: &mut std::collections::BinaryHeap<Ev>,
+    seq: &mut u64,
+) {
+    let Some((level, dir)) = w.calls.get(cid).map(|c| (c.level, c.dir)) else {
+        return;
+    };
+    if let Some(c) = w.calls.get_mut(cid) {
+        c.owner = Some(car);
+    }
+    plan_for_moving(w, car, level, dir);
+    wake(w, car, heap, seq);
 }
 
 /// 叫醒一台停在原地的轿厢。分配完新活之后调用。
@@ -510,34 +526,15 @@ fn assign_unowned<A: Assigner>(
     seq: &mut u64,
 ) {
     w.fill_views(sv);
-    // 没人负责的呼叫里挑还算数的。共享呼叫看灯，独立呼叫看层上还有没有人等。
-    // 独立呼叫不进槽位，出生时若全场只有僵死车，它会带主为空地留下。
-    // 这时只看槽位就永远不会把它捡起来，等的人只能等到弃梯
-    let live = |c: &Call| {
-        if c.exclusive {
-            waiting_for(w, c.level, c.dir)
-        } else {
-            is_live(w, c)
+    // 按下标走，不先抄一份清单，事件之间不分配内存。这是一次快照里
+    // 的外呼编号，派梯不会新增记录，循环期间下标稳定
+    let mut changed = false;
+    for i in 0..w.calls.calls.len() {
+        if !should_dispatch(w, i) {
+            continue;
         }
-    };
-    let unowned: Vec<HallCall> = w
-        .calls
-        .calls
-        .iter()
-        .filter(|c| c.owner.is_none() && !w.calls.slots.is_empty() && live(c))
-        .map(|c| HallCall {
-            id: c.id,
-            level: c.level,
-            dir: c.dir,
-            owner: None,
-            waiting: c.waiting,
-        })
-        .collect();
-    if unowned.is_empty() {
-        return;
-    }
-    for call in unowned {
-        let (owner, target) = {
+        let target = w.calls.calls[i].view(w.calls.calls[i].waiting);
+        let owner = {
             let view = SystemView {
                 now: w.now,
                 cars: &sv.briefs,
@@ -547,7 +544,7 @@ fn assign_unowned<A: Assigner>(
                 top_level: w.top,
                 n_cars: w.cars.len(),
             };
-            (assigner.assign(&view, call), call)
+            assigner.assign(&view, target)
         };
         let Some(car) = owner else { continue };
         // 内核兜底：算法选中的车如果接不了这一层，换一台干得了的。
@@ -556,21 +553,34 @@ fn assign_unowned<A: Assigner>(
         let car = if car_can_serve(w, car, target.level) {
             car
         } else {
-            match w.serving_cars_least_busy(target.level).first() {
-                Some(&alt) => alt,
-                None => continue,
-            }
+            let Some(alt) = w.least_busy_serving(target.level) else {
+                continue;
+            };
+            alt
         };
-        if let Some(c) = w.calls.get_mut(target.id) {
-            c.owner = Some(car);
-        }
-        sync_assignments(w);
-        plan_for_moving(w, car, target.level, target.dir);
-        wake(w, car, heap, seq);
+        hand_off(w, target.id, car, heap, seq);
+        changed = true;
         // 同层可能还停着别的闲车，它送得了归属车送不了的等待者。
         // 叫醒它，让它自己决定顺手接不接（在别的层会重新趴下，不白跑）
         wake_serving_idle(w, target.level, Some(car), heap, seq);
     }
+    // 待办列表在循环外同步一次。派梯过程不需要它，叫醒后的那一步才要
+    if changed {
+        sync_assignments(w);
+    }
+}
+
+/// 这条外呼此刻该不该派：没归属、还算数。独立呼叫不进槽位，
+/// 另看层上还有没有人在等，否则出生没主的独立呼叫永远没人捡
+fn should_dispatch(w: &World, i: usize) -> bool {
+    let c = &w.calls.calls[i];
+    if c.owner.is_some() || w.calls.slots.is_empty() {
+        return false;
+    }
+    if c.exclusive {
+        return waiting_for(w, c.level, c.dir);
+    }
+    w.call_is_live(c)
 }
 
 /// 把愿意停这一层、又停在原地待命的轿厢叫醒。`except` 是已经处理过的那一台。
@@ -595,11 +605,6 @@ fn wake_serving_idle(
 fn owned_by_stalled(w: &World, c: &Call) -> bool {
     c.owner
         .is_some_and(|o| o < w.cars.len() && w.cars[o].phase == CarPhase::Stalled)
-}
-
-/// 这条外呼还算不算数。判据在 `World::call_is_live`。
-fn call_is_live(w: &World, c: &Call) -> bool {
-    w.call_is_live(c)
 }
 
 /// 电梯厅里的人数变了，把外呼上记的人数刷新一次。
@@ -630,35 +635,22 @@ fn refresh_waiting(w: &mut World, level: i16, dir: Dir) {
     }
 }
 
-/// 这条外呼还挂在层上吗（灯还亮着）。只看共享槽位，独立呼叫走
-/// `call_is_live`，两者别混。
-fn is_live(w: &World, c: &Call) -> bool {
-    if c.level < -w.basement || c.level > w.top {
-        return false;
-    }
-    let slot = Call::slot_index(c.level, c.dir, w.basement);
-    w.calls.slots.get(slot).copied().flatten() == Some(c.id)
-}
-
 /// 清理已经没人等、也没人负责的外呼。
 ///
 /// 有人负责的呼叫一律保留：现实里按键灯亮着，轿厢一定会来，到了才发现
 /// 没人上，那一次停靠就是幽灵停站。这条判据正是红线 2 的落点。
 fn prune_calls(w: &mut World) {
-    let mut dead: Vec<(i16, Dir)> = Vec::new();
-    for slot in &w.calls.slots {
-        let Some(cid) = *slot else { continue };
+    // 按下标走，灭一条立刻灭，不先攒一份清单，事件之间不分配内存
+    for slot in 0..w.calls.slots.len() {
+        let Some(cid) = w.calls.slots[slot] else {
+            continue;
+        };
         let Some(c) = w.calls.get(cid) else { continue };
         let (level, dir) = (c.level, c.dir);
         let owned = c.owner.is_some();
-        if level < -w.basement || level > w.top {
-            dead.push((level, dir));
-        } else if !owned && !waiting_for(w, level, dir) {
-            dead.push((level, dir));
+        if level < -w.basement || level > w.top || (!owned && !waiting_for(w, level, dir)) {
+            kill_call(w, level, dir);
         }
-    }
-    for (lv, dir) in dead {
-        kill_call(w, lv, dir);
     }
 }
 
@@ -748,10 +740,10 @@ fn register_calls(w: &mut World, level: i16, newly: &[usize]) -> Vec<u32> {
                         let owner = if car_can_serve(w, t, level) {
                             t
                         } else {
-                            match w.serving_cars_least_busy(level).first() {
-                                Some(&alt) => alt,
-                                None => continue,
-                            }
+                            let Some(alt) = w.least_busy_serving(level) else {
+                                continue;
+                            };
+                            alt
                         };
                         if let Some(c) = w.calls.get_mut(id) {
                             c.owner = Some(owner);
@@ -875,9 +867,8 @@ fn step_car<R: Router, B: Boarding>(
                 //
                 // 位子按额定算，不按物理极限算。13 到 17 人之间时这道门不开，
                 // 层上的人只能等耐心耗尽，与红线 3 的挤梯口径不一致，这是已知取舍：
-                // 按极限开门的话，一次谁也挤不上的空停靠会把门反复撬开，
-                // 而趴下的车没有唤醒机制，只能靠新外呼叫醒。
-                // 想动这里，先给闲置有活的车补唤醒，再放宽这道门，顺序不能反
+                // 按极限开门会多出一次谁也挤不上的空停靠，白付一次停靠开销，
+                // 那批人还要再等下一趟。想放宽，先用测试确认满员到站不会把车留在原地
                 let has_free = w.cars[id].occupants.len() < w.cfg.cars[id].capacity_rated;
                 let someone = waiting_for(w, here, Dir::Up) || waiting_for(w, here, Dir::Down);
                 // 刚在这一层收过尾就不要再开门。否则车没满又挤不上人时，
@@ -1050,24 +1041,26 @@ fn start_leg(w: &mut World, id: CarId, target: i16) -> bool {
 fn plan_leg(w: &mut World, id: CarId, from: i16, target: i16, dir: Dir) {
     let lo = from.min(target);
     let hi = from.max(target);
-    let mut add: Vec<(i16, Dir)> = Vec::new();
-    for &cid in &w.cars[id].assigned {
-        if let Some(c) = w.calls.get(cid) {
-            if c.level == target {
-                add.push((c.level, c.dir));
-            } else if c.dir == dir && c.level >= lo && c.level <= hi && c.level != from {
-                add.push((c.level, c.dir));
-            }
+    // 按下标扫，不先抄一份待停清单，这条腿的规划不分配内存
+    for k in 0..w.cars[id].assigned.len() {
+        let cid = w.cars[id].assigned[k];
+        let Some(c) = w.calls.get(cid) else {
+            continue;
+        };
+        let on_the_way = c.dir == dir && c.level >= lo && c.level <= hi && c.level != from;
+        if c.level != target && !on_the_way {
+            continue;
         }
-    }
-    for &p in &w.cars[id].occupants {
-        let t = w.pax[p].to;
-        if t >= lo && t <= hi && t != from {
-            add.push((t, dir));
-        }
-    }
-    for pair in add {
+        let pair = (c.level, c.dir);
         if !w.cars[id].stops_planned.contains(&pair) {
+            w.cars[id].stops_planned.push(pair);
+        }
+    }
+    for k in 0..w.cars[id].occupants.len() {
+        let pid = w.cars[id].occupants[k];
+        let t = w.pax[pid].to;
+        let pair = (t, dir);
+        if t >= lo && t <= hi && t != from && !w.cars[id].stops_planned.contains(&pair) {
             w.cars[id].stops_planned.push(pair);
         }
     }
@@ -1700,7 +1693,7 @@ fn collect(w: &World, mut stalls: usize, mut stall_seconds: f64, mut m: Metrics)
         .iter()
         .filter(|c| {
             c.orphaned
-                || (call_is_live(w, c) && owned_by_stalled(w, c) && waiting_for(w, c.level, c.dir))
+                || (w.call_is_live(c) && owned_by_stalled(w, c) && waiting_for(w, c.level, c.dir))
         })
         .count();
     for s in m.by_floor.iter_mut() {
@@ -1761,7 +1754,7 @@ pub fn quick(mut cfg: Config, seed: u64) -> Run {
 mod tests {
     use super::*;
     use crate::config::{preset, CallSurface, CarSpec, StrategyMix};
-    use crate::policy::RunView;
+    use crate::policy::{HallCall, RunView};
 
     fn small() -> Config {
         let mut c = Config::default();

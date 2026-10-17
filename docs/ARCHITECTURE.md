@@ -145,11 +145,12 @@ Stalled  -> StallTick 循环 -> Idle
 每层电梯厅容量 = 该层住户数上界
 ```
 
-但「之后再也不 `malloc`」目前不成立：`assign_unowned` 的待派列表、`prune_calls`
-的死亡槽位、`plan_leg` 的预定表、`board_and_alight` 的下梯名单、
-`serving_cars_least_busy` 的候选表，每次调用都新申请一个 `Vec`。实测单跑毫秒级，
-这几处不是瓶颈，所以先把文档改诚实，优化等火焰图说了算，见
-[`PERFORMANCE.md`](PERFORMANCE.md) 第 4 节。
+派梯与规划这两条热路径已经不分配了。待派清单与死亡槽位改成按下标扫，
+`plan_leg` 的待停表改成边扫边插，兜底选车直接取最闲的一台，不先拼一张候选表。
+
+还剩一处：`board_and_alight` 的下梯名单每次停靠新申请一个 `Vec`。一次停靠最多
+十几个人，这个表总共几百字节，实测单跑毫秒级，所以先把文档改诚实，
+优化等火焰图说了算，见 [`PERFORMANCE.md`](PERFORMANCE.md) 第 4 节。
 
 ### 4.2 视图靠复用缓冲
 
