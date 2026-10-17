@@ -110,15 +110,15 @@
 - [x] 手写 SVG 的两张图：逐层等待量、等待时间直方图
 - [x] URL hash 存配置，预设按钮
 - [x] `make single` 产出可双击的单文件版 `dist/tihu.html`
-- [ ] 批量调用接口。现在一次只跑一栋楼
-- [ ] 单次调用耗时的实测数字。还没量
+- [x] 批量调用接口。按种子范围切段，多个 Worker 各算一段再合并
+- [x] 单次调用耗时的实测数字。见 PERFORMANCE 第 6.1 节
 
 **验收**
 
 - [ ] 网页与 CLI 同一参数同一份种子，结果一致到 1e-9。CLI 还没有 `run` 子命令，暂时由 `cargo run --example sweep` 侧证
 - [x] 断网状态下 `dist/tihu.html` 双击可用。内联 WASM，零外部请求
-- [ ] 一次调用的开销不超过目标值 100 ms，数字进 PERFORMANCE
-- [ ] WASM 产物体积进 PERFORMANCE 第 6 节
+- [x] 一次调用的开销不超过目标值 100 ms，数字进 PERFORMANCE
+- [x] WASM 产物体积进 PERFORMANCE 第 6 节
 
 **顺带产出。** `crates/tihu-core/examples/sweep.rs` 与 [`SIMULATE.md`](SIMULATE.md)。
 七组参数扫描，每组五个种子取平均，全部数字可重跑。

@@ -28,17 +28,32 @@ function b64ToBytes(b64) {
 }
 
 async function loadWasm() {
-  let bytes;
   if (typeof window.TIHU_WASM_BASE64 === "string") {
     // 单文件版：产物以 base64 内嵌在 HTML 里，file:// 下也能双击打开。
-    bytes = b64ToBytes(window.TIHU_WASM_BASE64);
-  } else {
-    const res = await fetch("tihu.wasm");
-    if (!res.ok) throw new Error("拿不到 tihu.wasm，状态码 " + res.status);
-    bytes = new Uint8Array(await res.arrayBuffer());
+    wasmBytes = b64ToBytes(window.TIHU_WASM_BASE64);
+    const { instance } = await WebAssembly.instantiate(wasmBytes, {});
+    return instance.exports;
   }
-  const { instance } = await WebAssembly.instantiate(bytes, {});
-  wasmBytes = bytes;
+  const res = await fetch("tihu.wasm");
+  if (!res.ok) throw new Error("拿不到 tihu.wasm，状态码 " + res.status);
+  // 流式编译边下载边编译，两件事重叠着做。产物字节另要一份给工人，
+  // 所以先 clone，两条分支各读一路，不用下两遍
+  const wantStream = WebAssembly.instantiateStreaming &&
+    (res.headers.get("content-type") || "").includes("wasm");
+  if (wantStream) {
+    const copy = res.clone();
+    try {
+      const { instance } = await WebAssembly.instantiateStreaming(res, {});
+      wasmBytes = new Uint8Array(await copy.arrayBuffer());
+      return instance.exports;
+    } catch (e) {
+      // MIME 不对或者流断在中途，退回整块编译
+      wasmBytes = new Uint8Array(await copy.arrayBuffer());
+    }
+  } else {
+    wasmBytes = new Uint8Array(await res.arrayBuffer());
+  }
+  const { instance } = await WebAssembly.instantiate(wasmBytes, {});
   return instance.exports;
 }
 
@@ -354,14 +369,121 @@ const PARALLEL_MIN_RUNS = 64;
 const PARALLEL_MAX_WORKERS = 8;
 const PARALLEL_MIN_CHUNK = 8;
 
-// 工人源码。单文件版由 embed.js 内嵌在 #tihu-worker-src 里，
-// 静态服务器下按 worker.js 文件名拿。都拿不到就回退同步。
-async function workerSource() {
+// 池子只建一次，之后每轮只换种子区间。早先是每轮新建一批 Worker，每人重发
+// 一份四百多 KB 的产物再重新实例化 WASM，拖一次滑块就付一遍这个钱。
+// 工人协议变了就加一。浏览器会按 URL 缓存 worker.js，新前端配旧工人时
+// 旧工人不回轮次号，主线程认不出结果只能干等，加个查询串强制换新的
+const WORKER_VERSION = 2;
+const pool = { workers: [], url: null, ready: false, seq: 0 };
+const poolWaiters = new Map(); // 「轮次:片号」→ { worker, resolve, reject }
+const poolInits = new Map(); // 工人 → { resolve, reject }
+
+// 被顶掉和真出错是两回事。前者回退同步只会白算一遍旧配置，得分开
+function cancelledError() {
+  const e = new Error("这一轮被顶掉了");
+  e.cancelled = true;
+  return e;
+}
+
+function disposePool(reason) {
+  for (const [key, it] of poolWaiters) {
+    poolWaiters.delete(key);
+    it.reject(reason || cancelledError());
+  }
+  poolWaiters.clear();
+  for (const [w, it] of poolInits) {
+    poolInits.delete(w);
+    it.reject(reason || cancelledError());
+  }
+  for (const w of pool.workers) {
+    try { w.terminate(); } catch { /* 已经停掉的不用管 */ }
+  }
+  if (pool.url) URL.revokeObjectURL(pool.url);
+  pool.workers = [];
+  pool.url = null;
+  pool.ready = false;
+}
+
+// 一条消息要么是初始化握手，要么是某一轮某一片的结果。轮次号对不上就是
+// 被顶掉的旧任务，结果直接丢，不能混进新一轮的合并里
+function onWorkerMessage(worker, e) {
+  const m = e.data || {};
+  if (m.type === "ready" || m.type === "failed") {
+    const it = poolInits.get(worker);
+    if (!it) return;
+    poolInits.delete(worker);
+    if (m.type === "ready") it.resolve();
+    else it.reject(new Error(m.message || "工人没启动"));
+    return;
+  }
+  const key = m.seq + ":" + m.job;
+  const it = poolWaiters.get(key);
+  if (!it || it.worker !== worker) return;
+  poolWaiters.delete(key);
+  if (m.type === "result") it.resolve(m.res);
+  else it.reject(new Error(m.message || "工人算错了"));
+}
+
+function failWorker(worker) {
+  const err = new Error("工人报错，多半是当前环境建不起 Worker");
+  const init = poolInits.get(worker);
+  if (init) {
+    poolInits.delete(worker);
+    init.reject(err);
+  }
+  // 半死的池子留着只会反复失败，整只扔掉，下一轮重建
+  disposePool(err);
+}
+
+// 建池中。两次 run() 先后脚进来时共用同一次建池，不然会造出两组工人。
+let poolBuilding = null;
+
+function ensurePool() {
+  if (pool.ready) return Promise.resolve(pool);
+  if (poolBuilding) return poolBuilding;
+  poolBuilding = buildPool().finally(() => { poolBuilding = null; });
+  return poolBuilding;
+}
+
+// 工人源码。单文件版由 embed.js 内嵌在 #tihu-worker-src 里，用 Blob 启动。
+// 静态服务器下直接指 worker.js 的地址，省掉一次取源码和一次新建 Blob。
+async function buildPool() {
+  if (pool.ready) return pool;
+  let url = null;
   const el = document.getElementById("tihu-worker-src");
-  if (el && el.textContent.trim()) return el.textContent;
-  const res = await fetch("worker.js");
-  if (!res.ok) throw new Error("拿不到 worker.js，状态码 " + res.status);
-  return await res.text();
+  if (el && el.textContent.trim()) {
+    url = URL.createObjectURL(new Blob([el.textContent], { type: "text/javascript" }));
+  }
+  const n = Math.max(1, Math.min(PARALLEL_MAX_WORKERS, navigator.hardwareConcurrency || 4));
+  const workers = [];
+  try {
+    for (let i = 0; i < n; i++) {
+      const w = url ? new Worker(url) : new Worker("worker.js?v=" + WORKER_VERSION);
+      w.onmessage = (e) => onWorkerMessage(w, e);
+      w.onerror = () => failWorker(w);
+      workers.push(w);
+    }
+    // 任一工人就绪失败就整体放弃，不留半个池子
+    await Promise.all(workers.map((w) => new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        poolInits.delete(w);
+        reject(new Error("工人就绪超时"));
+      }, 10000);
+      poolInits.set(w, {
+        resolve: () => { clearTimeout(timer); resolve(); },
+        reject: (err) => { clearTimeout(timer); reject(err); },
+      });
+      w.postMessage({ type: "init", wasmBytes });
+    })));
+  } catch (e) {
+    for (const w of workers) {
+      try { w.terminate(); } catch { /* 同上 */ }
+    }
+    if (url) URL.revokeObjectURL(url);
+    throw e;
+  }
+  Object.assign(pool, { workers, url, ready: true });
+  return pool;
 }
 
 // 把 [from, to] 闭区间切成 n 段，尽量均分。
@@ -381,54 +503,48 @@ function splitRange(from, to, n) {
 async function runParallel(cfg, routerId, token, onProgress) {
   const from = cfg.sim.seed, to = cfg.sim.seed_to;
   const total = to - from + 1;
-  const parallelism = Math.min(PARALLEL_MAX_WORKERS, navigator.hardwareConcurrency || 4);
-  const n = Math.max(1, Math.min(parallelism, Math.floor(total / PARALLEL_MIN_CHUNK)));
-  if (n <= 1 || typeof Worker === "undefined" || !wasmBytes) {
+  if (typeof Worker === "undefined" || !wasmBytes) {
     throw new Error("并行条件不够，回退同步");
   }
-  const src = await workerSource();
+  // 上一轮的分片还在算，工人单线程，新任务只能排在后面。拖滑块时旧结果
+  // 已经没用，把池子换新的比回收旧任务快，也比旧版每轮重建快
+  if (poolWaiters.size) disposePool();
+  const p = await ensurePool();
   if (token !== runToken) return { cancelled: true };
-  const url = URL.createObjectURL(new Blob([src], { type: "text/javascript" }));
-  const workers = [];
+  const n = Math.min(p.workers.length, Math.floor(total / PARALLEL_MIN_CHUNK));
+  if (n <= 1) throw new Error("并行条件不够，回退同步");
+  // 轮次号让旧任务的结果能被认出来。滑块一拖，上一轮派出去的片段还在路上，
+  // 没有这个号就会把上一轮的数算进这一轮
+  const seq = ++pool.seq;
+  const ranges = splitRange(from, to, n);
+  let done = 0;
+  const jobs = [];
+  for (let i = 0; i < n; i++) {
+    const [a, b] = ranges[i];
+    const job = Object.assign(clone(cfg), { sim: Object.assign({}, cfg.sim, { seed: a, seed_to: b }) });
+    const part = new Promise((resolve, reject) => {
+      poolWaiters.set(seq + ":" + i, { worker: p.workers[i], resolve, reject });
+      p.workers[i].postMessage({ type: "run", seq, job: i, cfgJson: JSON.stringify(job), routerId });
+    }).then((res) => {
+      if (!res || !res.ok) {
+        throw new Error(((res && res.issues && res.issues[0]) || {}).message || "分片没跑起来");
+      }
+      done += b - a + 1;
+      if (token === runToken) onProgress(done, total);
+      return res.sim;
+    });
+    jobs.push(part);
+  }
   try {
-    const ranges = splitRange(from, to, n);
-    for (let i = 0; i < n; i++) workers.push(new Worker(url));
-    // 任一工人就绪失败就整体回退，不留半个池子
-    await Promise.all(workers.map((w) => new Promise((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error("工人就绪超时")), 10000);
-      w.onmessage = (e) => {
-        if (e.data && e.data.type === "ready") { clearTimeout(timer); resolve(); }
-        else if (e.data && e.data.type === "failed") { clearTimeout(timer); reject(new Error(e.data.message)); }
-      };
-      w.onerror = () => { clearTimeout(timer); reject(new Error("工人报错，多半是当前环境建不起 Worker")); };
-      w.postMessage({ type: "init", wasmBytes });
-    })));
-    if (token !== runToken) return { cancelled: true };
-    const partials = new Array(n);
-    let done = 0;
-    await Promise.all(workers.map((w, i) => new Promise((resolve, reject) => {
-      const [a, b] = ranges[i];
-      const job = Object.assign(clone(cfg), { sim: Object.assign({}, cfg.sim, { seed: a, seed_to: b }) });
-      w.onmessage = (e) => {
-        const m = e.data || {};
-        if (m.type === "result") {
-          if (!m.res.ok) { reject(new Error((m.res.issues[0] || {}).message || "分片没跑起来")); return; }
-          partials[i] = m.res.sim;
-          done += b - a + 1;
-          onProgress(done, total);
-          resolve();
-        } else if (m.type === "error") {
-          reject(new Error(m.message));
-        }
-      };
-      w.onerror = () => reject(new Error("工人报错，多半是当前环境建不起 Worker"));
-      w.postMessage({ type: "run", job: i, cfgJson: JSON.stringify(job), routerId });
-    })));
+    const partials = await Promise.all(jobs);
     if (token !== runToken) return { cancelled: true };
     return { sim: mergeReports(partials) };
+  } catch (e) {
+    // 被顶掉不算失败，回退同步只会白算一遍旧配置
+    if (e && e.cancelled) return { cancelled: true };
+    throw e;
   } finally {
-    for (const w of workers) { try { w.terminate(); } catch { /* 终止失败不用管 */ } }
-    URL.revokeObjectURL(url);
+    for (let i = 0; i < n; i++) poolWaiters.delete(seq + ":" + i);
   }
 }
 

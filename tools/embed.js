@@ -29,6 +29,12 @@ if (worker.includes("</scr" + "ipt")) {
 }
 
 const swaps = [
+  // 单文件版没有 tihu.wasm 这个文件，预取留着只会多一条 404
+  [
+    '<!-- 产物有一百多 KB，让它跟样式脚本一起下，别等 app.js 跑起来才开口 -->\n' +
+      '<link rel="preload" href="tihu.wasm" as="fetch" type="application/wasm" crossorigin="anonymous">',
+    '',
+  ],
   ['<link rel="stylesheet" href="styles.css">', `<style>\n${css}\n</style>`],
   ['<script src="charts.js"></script>', `<script>\n${charts}\n</script>`],
   ['<script src="merge.js"></script>', `<script>\n${merge}\n</script>`],
@@ -47,7 +53,7 @@ for (const [from, to] of swaps) {
   html = html.replace(from, () => to);
 }
 
-if (html.includes('src="app.js"') || html.includes('src="merge.js"') || html.includes('href="styles.css"')) {
+if (html.includes('src="app.js"') || html.includes('src="merge.js"') || html.includes('href="styles.css"') || html.includes('rel="preload"')) {
   console.error("embed 失败：还有没内联进去的外部引用");
   process.exit(1);
 }

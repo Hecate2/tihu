@@ -18,3 +18,5 @@ panic = "abort"
 inherits = "release"
 opt-level = "z"
 lto = true
+# 名字节这些调试段落对运行没有用，网页要的只有字节数
+strip = true

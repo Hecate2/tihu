@@ -55,15 +55,16 @@ onmessage = async (e) => {
     return;
   }
   if (m.type === "run") {
+    // seq 与 job 一起原样带回，主线程靠它认出这是哪一轮哪一片
     if (!ex) {
-      postMessage({ type: "error", job: m.job, message: "WASM 还没就绪" });
+      postMessage({ type: "error", seq: m.seq, job: m.job, message: "WASM 还没就绪" });
       return;
     }
     try {
       const res = JSON.parse(pass(m.cfgJson, (p, n) => take(ex.tihu_run(p, n, m.routerId))));
-      postMessage({ type: "result", job: m.job, res });
+      postMessage({ type: "result", seq: m.seq, job: m.job, res });
     } catch (err) {
-      postMessage({ type: "error", job: m.job, message: String((err && err.message) || err) });
+      postMessage({ type: "error", seq: m.seq, job: m.job, message: String((err && err.message) || err) });
     }
   }
 };
