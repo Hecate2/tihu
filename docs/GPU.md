@@ -136,8 +136,6 @@ CUDA 锁死 NVIDIA，HIP 锁死 AMD。都不支持苹果。用了它们，「多
 
 | 项目 | 状态 |
 | --- | --- |
-| `calls_orphaned` | 恒为 0。僵局期间挂在卡车名下的外呼没有真正统计 |
-| `full_bypasses` | 恒为 0。满载直驶掠过的外呼次数没接上 |
 | `detour_seconds` | 反向叫梯的绕行时间没有单独计量 |
 | `car_load_avg` | 平均载客率没算 |
 | `stall_max` | 单次最长僵局没记 |

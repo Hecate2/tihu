@@ -49,7 +49,7 @@
 | 十万组合 × 20 次重复，16 核完成时间 | 5 分钟 | <!-- TODO --> |
 | 网页端一次调用同步返回 | 100 ms 以内 | 最差 11.3 ms，见第 6.1 节 |
 | WASM 相对原生的性能衰减 | 小于两倍 | <!-- TODO --> |
-| WASM 产物体积 raw plus gzip | <!-- TODO --> | 429.8 KiB 与 139.5 KiB，见第 6.1 节 |
+| WASM 产物体积 raw plus gzip | <!-- TODO --> | 432.8 KiB 与 140.5 KiB，见第 6.1 节 |
 
 这些数字是从 `REF` 的事件数量倒推出来的粗略期望。真跑起来差距超过三倍，就需要回头复查模型本身或者数据结构，而不是改数字。
 
@@ -115,14 +115,17 @@ CPU 型号与核数
 ### 6.1 实测
 
 环境：Apple M4 Pro 14 核，macOS 15.7.5，rustc 1.89.0，Node v22.19.0，
-`--profile release-wasm`。测量脚本是临时的，逻辑见下，不进仓库。
+`--profile release-wasm`。测量脚本是临时的，逻辑见下，不进仓库。体积一行用
+`wc -c web/tihu.wasm` 与 `gzip -n -c web/tihu.wasm | wc -c` 量，单文件版量 `dist/tihu.html`。
+`-n` 去掉 gzip 文件头里的时间戳，同一个产物重复量得到同一个字节数。
+先用 `make wasm single` 出新产物。
 
 | 项 | 数字 |
 | --- | --- |
-| WASM 产物 raw | 440,122 字节，429.8 KiB |
-| WASM 产物 gzip | 142,857 字节，139.5 KiB |
-| 单文件版 `dist/tihu.html` raw | 647,880 字节，632.7 KiB |
-| 单文件版 gzip | 218,506 字节，213.4 KiB |
+| WASM 产物 raw | 443,147 字节，432.8 KiB |
+| WASM 产物 gzip | 143,850 字节，140.5 KiB |
+| 单文件版 `dist/tihu.html` raw | 652,030 字节，636.7 KiB |
+| 单文件版 gzip | 221,373 字节，216.2 KiB |
 | `WebAssembly.instantiate` 耗时 | 约 0.9 ms |
 | wasm 线性内存 | 1,179,648 字节，1.13 MiB |
 | 单次调用，默认 18 层两梯 | 4.9 到 11.3 ms |

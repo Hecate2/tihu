@@ -97,6 +97,7 @@ c.sim.seed = 7;
 | 走楼梯的比例 | `stair_share` | 2.8% |
 | 停靠白不白费 | `ghost_stops` | 想知道就单独跑 |
 | 高速梯漏楼层吗 | `overshoots` | 想知道就单独跑 |
+| 卡死拖累了多少人 | `calls_orphaned` | 只在超载死锁开着时非零 |
 
 两条经验。
 

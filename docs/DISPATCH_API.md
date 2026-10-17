@@ -86,13 +86,17 @@ pub struct RunView<'a> {
 pub struct SystemView<'a> {
     pub now: f64,
     pub cars: &'a [CarBrief],   // 每台轿厢的位置、方向、载客率、名下待办数
-    pub pending: &'a [HallCall],   // 还没分配给任何轿厢的外呼
-    pub all_calls: &'a [HallCall], // 全部外呼，含已分配
+    pub pending: &'a [HallCall],   // 还没分配给任何轿厢、也还亮着的外呼
+    pub all_calls: &'a [HallCall], // 全部还算数的外呼，含已分配
     pub queue_len: &'a [u32],      // 每层电梯厅里现在有几个人
     pub top_level: i16,
     pub n_cars: usize,
 }
 ```
+
+灭灯的历史外呼不进视图。外呼编号永不复用，旧记录留在内核里备查，但它们不会
+出现在 `pending` 与 `all_calls` 里，算法不会因为一条已经服务过的呼叫被引到没人的
+楼层。`HallCall.waiting` 是此刻的人数，乘客到达、上车、弃梯时都会刷新。
 
 视图里的两个切片直接借用内核的复用缓冲，构造视图不分配内存。算法可以放心在
 热路径上反复调用。
@@ -120,8 +124,8 @@ pub struct SystemView<'a> {
 | `RunView.car_calls` | 在梯乘客的目的层，升序 |
 | `RunView.mine` | 这台车名下的外呼 |
 | `RunView.system.cars` | 每台车的位置、方向、人数、载重、名下待办数、是否僵住 |
-| `RunView.system.pending` | 还没派出去的外呼 |
-| `RunView.system.all_calls` | 全部外呼，含已分配 |
+| `RunView.system.pending` | 还没派出去、且还亮着的外呼 |
+| `RunView.system.all_calls` | 全部还算数的外呼，含已分配 |
 | `RunView.system.queue_len` | 每层电梯厅里现在有几个人 |
 | `RunView.floor_height` | 层高 |
 
@@ -210,8 +214,13 @@ pub trait Assigner {
 ### 6.1 停靠区域由内核兜底
 
 一个算法如果派了一台不停那一层的轿厢去接这条外呼，内核会换一台真正服务的车
-顶上。所以算法不检查停靠区域也不会出错，但会失去对派梯结果的控制。想写得准，
-就自己先筛一遍。
+顶上。派给僵死车也一样，内核换一台没卡的。返回的轿厢号越界，也就是下标根本
+不存在，内核同样换车，不会把仿真打崩。所以算法不检查这三条也不会出错，但会
+失去对派梯结果的控制。想写得准，就自己先筛一遍。
+
+`reassign` 写回时内核复查同一条底线。改判给一台送不了这层的车，内核把归属
+改回能服务的那台。写回生效之后，内核负责叫醒新车主。趴着的车立刻开出去，
+正在途中的车会算一次来不来得及刹住。算法只改归属表，不用自己排事件。
 
 ### 6.2 `reassign` 为什么会拉开差距
 
