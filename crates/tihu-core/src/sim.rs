@@ -1482,6 +1482,21 @@ fn try_board_one<B: Boarding>(
             false
         }
         Verdict::Admit => {
+            // 物理极限先判。装不下就是装不下，跟愿不愿意挤无关；放到骰子
+            // 后面的话，超重的人有一半概率被记成「不肯挤」，界面上两个
+            // 原因就串了。千克上限管真装不下，人数上限管真挤不进去。
+            let load_crush = w
+                .cfg
+                .boarding
+                .load_crush_kg(w.cfg.cars[id].rated_load_kg as f64);
+            if w.cars[id].load_kg + w.pax[pid].weight > load_crush + 1e-9 {
+                w.pax[pid].no_space_count += 1;
+                return false;
+            }
+            if w.cars[id].occupants.len() >= crush {
+                w.pax[pid].no_space_count += 1;
+                return false;
+            }
             // 中间地带要掷骰子。策略对象本身不掷，随机性归内核。
             // 这一步是红线 3 的核心：越接近满载，越可能有人放弃。
             // 概率按配置里的拒挤曲线算，不能用写死的默认值，
@@ -1489,24 +1504,7 @@ fn try_board_one<B: Boarding>(
             let prob = default_accept_prob(&w.cfg.boarding, &sample, tol);
             if prob < 1.0 && !rng.chance(Stream::Squeeze, prob) {
                 w.pax[pid].declined_count += 1;
-                    return false;
-            }
-            // 物理极限。两个上限取先到的那个。
-            //
-            // 千克上限管的是真装不下，人数上限管的是真挤不进去。乘客自己看不到
-            // 重量，他只知道自己是不是被夹住了，所以上面的心理判据一路按人数走，
-            // 这一步才看载重
-            let load_crush = w
-                .cfg
-                .boarding
-                .load_crush_kg(w.cfg.cars[id].rated_load_kg as f64);
-            if w.cars[id].load_kg + w.pax[pid].weight > load_crush + 1e-9 {
-                w.pax[pid].no_space_count += 1;
-                    return false;
-            }
-            if w.cars[id].occupants.len() >= crush {
-                w.pax[pid].no_space_count += 1;
-                    return false;
+                return false;
             }
             w.cars[id].occupants.push(pid);
             w.cars[id].load_kg += w.pax[pid].weight;
@@ -2485,6 +2483,38 @@ mod tests {
             .filter(|p| p.bypass() > 0 && p.t_exit > 0.0)
             .count();
         assert!(served_with_bypass > 0, "被跳过的人最终也该被送走");
+    }
+
+    /// 载重装不下的时候，原因要记成「没位子」。
+    ///
+    /// 骰子先掷的话，超重的人有一半概率被记成「不肯挤」，界面上这两个
+    /// 原因是分开显示的，一混就分不清该加电梯还是该改轿厢。
+    #[test]
+    fn overweight_is_no_space_not_declined() {
+        let mut c = small();
+        // 把关卡压到零，人人掷骰子，串错的机会最大
+        c.boarding.soft_start_ratio = 0.0;
+        let mut w = World::new(c);
+        w.pax[0].from = 5;
+        w.pax[0].to = 1;
+        w.pax[0].weight = 80.0;
+        w.pax[0].t_arrive = 0.0;
+        w.pax[0].t_exit = 0.0;
+        w.pax[0].used_stairs = false;
+        w.pax[0].abandoned = false;
+        w.pax[0].boarded_car = None;
+        // 车上十五人 1080 公斤。再来八十公斤就过 1100 的载重上限，
+        // 而人数上限十七还差两个
+        w.cars[0].occupants = (1..16).collect();
+        w.cars[0].load_kg = 1080.0;
+        let boarding = crate::builtin::DefaultBoarding {
+            cfg: w.cfg.boarding.clone(),
+        };
+        let mut rng = Streams::new(1);
+        let admitted = try_board_one(&mut w, 0, 5, 0, Dir::Down, &boarding, 0.0, &mut rng);
+        assert!(!admitted, "超重的人上不去");
+        assert_eq!(w.pax[0].no_space_count, 1, "这是装不下，不是不愿意挤");
+        assert_eq!(w.pax[0].declined_count, 0);
     }
 
     /// 拒挤曲线的四个软参数必须进决策。同一份种子下拧旋钮，
