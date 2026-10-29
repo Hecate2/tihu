@@ -275,9 +275,11 @@ type DynRouter = Box<dyn Router>;
 ### 6.4 注册表
 
 网页下拉框与 `tihu_run` 的第四个参数从同一张表里选：`tihu-wasm/src/lib.rs` 的
-`ROUTERS`，按下标取名字，再在 `dispatch` 里分到具体的泛型实例上。加一个新算法要动
-三处：内核里加类型、表里加一行、`dispatch` 与 `dispatch_batch` 各加一条分支。
-`tihu-core` 不认识名字，它只认类型，这样内核不必为一个 UI 需求引入字符串匹配。
+`ROUTERS`，按下标取名字。表里每一行带一个 `Which` 枚举，`dispatch` 按枚举分到
+具体的泛型实例上，加一个算法要动三处：枚举加一项、表加一行、`dispatch` 加一条
+分支。第三处由编译器盯着，漏了就编不过。名字拼错或者下标越界一律报
+`unknown_router`，不退回默认算法。`tihu-core` 不认识名字，它只认类型，这样内核
+不必为一个 UI 需求引入字符串匹配。
 
 ---
 

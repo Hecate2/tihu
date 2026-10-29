@@ -25,8 +25,8 @@ const mergeReports = globalThis.mergeReports;
   const run = (cfg, router) => pass(JSON.stringify(cfg), (p, n) => JSON.parse(take(e.tihu_run(p, n, router))));
   const cfg0 = JSON.parse(take(e.tihu_config(0)));
 
-  // 算法表从产物里读，删掉一个算法这个脚本就少跑一组，不会留下一个
-  // 越界的下标静默退回默认算法
+  // 算法表从产物里读，表里删掉一个算法，这个脚本就少跑一组。写死下标的话，
+  // 表一变短那组就报 unknown_router，跑不出数
   const routers = JSON.parse(take(e.tihu_config(2)));
   const cases = [];
   for (const [from, to] of [[42, 141], [7, 106]]) {

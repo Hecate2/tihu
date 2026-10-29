@@ -18,6 +18,17 @@ use tihu_core::config::{Config, Severity, LOBBY};
 use tihu_core::metrics::{Metrics, Summary};
 use tihu_core::sim::{self, Run};
 
+/// 一台轿厢的走向算法。表里写哪个，`dispatch` 就实例化哪个。
+///
+/// 用枚举而不是按名字再匹配一次：表里加一行，编译器会逼着把 `dispatch` 的
+/// 分支补齐。写成 `match name { "x" => ..., _ => 默认 }` 的话，忘了加分支
+/// 就会静默跑成默认算法，而报告里还印着新名字。
+#[derive(Clone, Copy)]
+enum Which {
+    DownPeakSweep,
+    CollectiveScan,
+}
+
 /// 可选的一种走向算法。序号与网页下拉框一一对应。
 struct RouterRow {
     name: &'static str,
@@ -25,13 +36,16 @@ struct RouterRow {
     label: &'static str,
     /// 下拉框下面单独开一块显示的一句话
     desc: &'static str,
+    /// 选这一行时实际跑哪个算法
+    which: Which,
 }
 
-/// 可选的走向算法表。加一个算法加一项，删一个删一行。
+/// 可选的走向算法表。加一个算法：`Which` 加一项，这里加一行，`dispatch` 的
+/// 分支由编译器盯着补齐。删一个就反过来删三处。
 ///
-/// 名字、标签、解释写在同一行。分成三张平行数组的话，少改一张就会把标签
-/// 配到另一个算法上，编译期看不出来。用切片而不是定长数组，也就没有第二处
-/// 要跟着改的个数。
+/// 名字、标签、解释、算法写在同一个结构体里。分成几张平行数组的话，少改一张
+/// 就会把标签配到另一个算法上，编译期看不出来。用切片而不是定长数组，也就
+/// 没有第二处要跟着改的个数。
 ///
 /// 这里的「走向」指车开出去之后往哪走。新按下的一条外呼分给哪台轿厢由内核
 /// 的派梯规则统一负责，两种算法在这一层完全一样。满载直驶也是内核行为，
@@ -42,11 +56,13 @@ const ROUTERS: &[RouterRow] = &[
         name: "down_peak_sweep",
         label: "定向扫楼：先上到顶再一路下行",
         desc: "先开到当前最高的那个呼叫层，再一路往下扫到最低。早高峰大家同时下楼时最省事，晚高峰要上楼的客流会被它绕远。",
+        which: Which::DownPeakSweep,
     },
     RouterRow {
         name: "collective_scan",
         label: "集选：沿一个方向走，沿途有人按就停",
         desc: "轿厢认准一个方向走，路上有同向的呼叫就停，走到头再掉头。任何时段都能用，是住宅楼的通用选择。",
+        which: Which::CollectiveScan,
     },
 ];
 
@@ -500,36 +516,44 @@ pub fn speed_tiers_json() -> String {
     serde_json::to_string(&list).unwrap_or_else(|_| "[]".to_string())
 }
 
-/// 按名字挑一套算法跑一次。
+/// 按表里那一行挑一套算法跑一次。
 ///
 /// 上下客规则与满载直驶阈值都按配置走，不用写死的默认值，
 /// 否则网页上根本没有旋钮能拧动拒挤曲线。
-fn dispatch(cfg: Config, router: &str) -> Run {
+fn dispatch(cfg: Config, which: Which) -> Run {
     let b = tihu_core::builtin::DefaultBoarding { cfg: cfg.boarding.clone() };
-    match router {
-        "collective_scan" => sim::run(cfg, &mut CollectiveScan, &mut LoadAwareEta::default(), &b),
-        _ => sim::run(cfg, &mut DownPeakSweep, &mut LoadAwareEta::default(), &b),
+    match which {
+        Which::DownPeakSweep => sim::run(cfg, &mut DownPeakSweep, &mut LoadAwareEta::default(), &b),
+        Which::CollectiveScan => {
+            sim::run(cfg, &mut CollectiveScan, &mut LoadAwareEta::default(), &b)
+        }
     }
 }
 
-/// 按名字挑一套算法，把整段种子跑完再汇总。范围取自配置里的 `seed_to`。
+/// 按表里那一行挑一套算法，把整段种子跑完再汇总。范围取自配置里的 `seed_to`。
 ///
 /// 与 `dispatch` 用同一组算法对象，区别只在循环在哪儿。聚合口径见
 /// [`tihu_core::batch`]。
-fn dispatch_batch(cfg: Config, router: &str) -> SeedBatch {
+fn dispatch_batch(cfg: Config, which: Which) -> SeedBatch {
     let b = tihu_core::builtin::DefaultBoarding { cfg: cfg.boarding.clone() };
-    match router {
-        "collective_scan" => {
+    match which {
+        Which::DownPeakSweep => {
+            batch::run_seeds(&cfg, &mut DownPeakSweep, &mut LoadAwareEta::default(), &b)
+        }
+        Which::CollectiveScan => {
             batch::run_seeds(&cfg, &mut CollectiveScan, &mut LoadAwareEta::default(), &b)
         }
-        _ => batch::run_seeds(&cfg, &mut DownPeakSweep, &mut LoadAwareEta::default(), &b),
     }
 }
 
 /// 跑一次仿真。这是本 crate 的核心入口，网页与测试都走它。
 ///
-/// 配置不合法时返回 `{"ok":false,"issues":[...]}`，不让任何一条硬约束被绕过。
+/// 配置不合法、算法名不存在时返回 `{"ok":false,"issues":[...]}`，不让任何一条
+/// 硬约束或调用方的笔误被悄悄放过。
 pub fn report_json(cfg_json: &str, router: &str) -> String {
+    let Some(row) = ROUTERS.iter().find(|r| r.name == router) else {
+        return fail("unknown_router", format!("没有叫 {router} 的走向算法"));
+    };
     let cfg: Config = match serde_json::from_str(cfg_json) {
         Ok(c) => c,
         Err(e) => {
@@ -542,16 +566,14 @@ pub fn report_json(cfg_json: &str, router: &str) -> String {
         return serde_json::to_string(&Response { ok: false, issues, sim: None })
             .unwrap_or_else(|_| r#"{"ok":false,"issues":[]}"#.to_string());
     }
-    // 认不出名字就用表里第一个，不让一个拼错的名字把整次调用变成错误
-    let router = ROUTERS.iter().find(|r| r.name == router).unwrap_or(&ROUTERS[0]).name;
     let cfg = cfg.sanitized();
     // 结束值大于根种子才走批量，否则照旧单跑，报告里一个批量字段都不出现
     let sim = if cfg.sim.seed_to.is_some_and(|t| t > cfg.sim.seed) {
-        let batch = dispatch_batch(cfg.clone(), router);
-        SimReport::of_batch(&batch, &cfg, router)
+        let batch = dispatch_batch(cfg.clone(), row.which);
+        SimReport::of_batch(&batch, &cfg, row.name)
     } else {
-        let run = dispatch(cfg, router);
-        SimReport::of(&run, router)
+        let run = dispatch(cfg, row.which);
+        SimReport::of(&run, row.name)
     };
     serde_json::to_string(&Response { ok: true, issues: vec![], sim: Some(sim) })
         .unwrap_or_else(|_| r#"{"ok":false,"issues":[]}"#.to_string())
@@ -606,13 +628,20 @@ fn to_buf(s: String) -> *mut u8 {
     p
 }
 
-/// 跑一次仿真。`router_id` 是走向算法序号，越界时用 0。
+/// 跑一次仿真。`router_id` 是走向算法序号，越界时交回一条错误报告。
 ///
 /// # Safety
 /// `cfg_ptr` 必须指向 `cfg_len` 个有效字节，且那些字节拼起来是合法 UTF-8。
 #[no_mangle]
 pub unsafe extern "C" fn tihu_run(cfg_ptr: *const u8, cfg_len: usize, router_id: u32) -> *mut u8 {
-    let router = ROUTERS.get(router_id as usize).unwrap_or(&ROUTERS[0]).name;
+    // 越界不兜底。悄悄换一个算法跑完，报告里印的还是新名字，调用方看不出
+    // 自己传错了。要兜底也得由调用方自己挑一个合法序号
+    let Some(row) = ROUTERS.get(router_id as usize) else {
+        return to_buf(fail(
+            "unknown_router",
+            format!("走向算法序号 {router_id} 越界，表里只有 {} 个", ROUTERS.len()),
+        ));
+    };
     let json = if cfg_ptr.is_null() || cfg_len == 0 {
         String::new()
     } else {
@@ -625,7 +654,7 @@ pub unsafe extern "C" fn tihu_run(cfg_ptr: *const u8, cfg_len: usize, router_id:
             }
         }
     };
-    to_buf(report_json(&json, router))
+    to_buf(report_json(&json, row.name))
 }
 
 /// 交出默认配置、某个预设、预设清单、算法清单，或者速度档位表。
@@ -724,13 +753,36 @@ mod tests {
         assert_eq!(v["issues"][0]["code"], "json_parse");
     }
 
-    /// 未知算法名要退回默认，不能报错。
+    /// 名字拼错要报错。悄悄退回默认算法的话，报告里的 `router` 会写着
+    /// 那个拼错的名字，而实际跑的是另一个算法。
     #[test]
-    fn unknown_router_falls_back() {
+    fn unknown_router_is_rejected() {
         let r = report_json(&default_config_json(), "definitely-not-a-router");
         let v: serde_json::Value = serde_json::from_str(&r).unwrap();
-        assert_eq!(v["ok"], true);
-        assert_eq!(v["sim"]["router"], "down_peak_sweep");
+        assert_eq!(v["ok"], false);
+        assert_eq!(v["issues"][0]["code"], "unknown_router");
+    }
+
+    /// 序号越界同样要报错。这是 ABI 上唯一能传错的东西，兜底就等于让调用方
+    /// 永远发现不了自己传错了。
+    #[test]
+    fn router_id_out_of_range_is_rejected() {
+        let cfg = default_config_json();
+        let bytes = cfg.as_bytes();
+        // SAFETY: 手工铺一块缓冲区当调用方，模拟 JS 侧先 alloc 再写。
+        unsafe {
+            let p = tihu_alloc(bytes.len());
+            std::ptr::copy_nonoverlapping(bytes.as_ptr(), p, bytes.len());
+            let out = tihu_run(p, bytes.len(), 7);
+            tihu_free(p, bytes.len());
+            let head = std::slice::from_raw_parts(out, 4);
+            let len = u32::from_le_bytes([head[0], head[1], head[2], head[3]]) as usize;
+            let body = std::slice::from_raw_parts(out.add(4), len);
+            let v: serde_json::Value = serde_json::from_slice(body).unwrap();
+            assert_eq!(v["ok"], false);
+            assert_eq!(v["issues"][0]["code"], "unknown_router");
+            tihu_free(out, len + 4);
+        }
     }
 
     /// 表里的名字必须是类型自己报的那个名字。
