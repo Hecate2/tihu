@@ -484,6 +484,9 @@ pub fn presets_json() -> String {
 }
 
 /// 预设的中文说明。只在网页的下拉框里出现。
+///
+/// 上表的每个名字都得在这有一行。`every_preset_has_a_label` 那条测试
+/// 逐个调一遍，漏了就红，不会让下拉框里冒出一个「预设」蒙混过去。
 fn preset_label(name: &str) -> &'static str {
     match name {
         "std_residential" => "18 层住宅，2 梯 4 户",
@@ -493,7 +496,7 @@ fn preset_label(name: &str) -> &'static str {
         "stress_stalled_car" => "1 台梯，超载死锁开着",
         "stress_mixed_traffic" => "中午双向，3 台梯",
         "hospital" => "院楼，层间交通为主",
-        _ => "预设",
+        _ => unreachable!("预设 {name} 没有中文说明"),
     }
 }
 
@@ -701,6 +704,13 @@ mod tests {
         assert_eq!(level_label(19), "19F");
         assert_eq!(level_label(-1), "B1");
         assert_eq!(level_label(-2), "B2");
+    }
+
+    #[test]
+    fn every_preset_has_a_label() {
+        for name in tihu_core::config::preset_names() {
+            assert!(!preset_label(name).is_empty(), "预设 {name} 的说明是空的");
+        }
     }
 
     #[test]

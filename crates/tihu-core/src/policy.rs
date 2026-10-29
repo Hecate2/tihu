@@ -133,7 +133,7 @@ impl RunView<'_> {
         let first = it.next()?;
         Some(it.fold(first, |acc, l| match dir {
             Dir::Up => acc.max(l),
-            _ => acc.min(l),
+            Dir::Down | Dir::None => acc.min(l),
         }))
     }
 

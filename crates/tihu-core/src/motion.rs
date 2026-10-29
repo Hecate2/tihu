@@ -55,7 +55,7 @@ impl MotionProfile {
             .iter()
             .min_by(|a, b| (a.0 - v_max).abs().total_cmp(&(b.0 - v_max).abs()))
             .copied()
-            .unwrap_or(SPEED_TIERS[2]);
+            .expect("档位表是常量，至少有一档");
         Self { v_max, a_acc: t.1, a_dec: t.1, j_acc: t.2, j_dec: t.2 }
     }
 
