@@ -61,7 +61,8 @@ impl MotionProfile {
 
     /// 住宅常见的速度档位预设。加速度与加加速度一律待标定。
     ///
-    /// 表中的时间数字由 [`traverse_time`] 算出，可重跑 `cargo bench --bench kinematics` 复现。
+    /// 表中的时间数字由 [`traverse_time`] 算出。`preset_table_matches_doc` 那条
+    /// 测试逐项钉住这五个数，改参数就会红。`benches/` 还空着，还没有基准可跑。
     pub fn preset(name: &str) -> Option<Self> {
         let v = match name {
             "low_rise_1_0" => 1.00,

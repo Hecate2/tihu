@@ -10,18 +10,21 @@
 tihu/
 ├── AGENTS.md              设计意图与红线
 ├── Cargo.toml             workspace
+├── Makefile               wasm / web / single / serve / smoke
 ├── crates/
-│   ├── tihu-core/         仿真内核。无 IO，无网络，无外部依赖。约六千行
-│   ├── tihu-cli/          空壳。只有 fn main() {}
-│   └── tihu-wasm/         空壳。lib.rs 是零字节
-├── web/                   空目录
-├── benches/               空目录。criterion 基准还没写
-├── harness/               空目录。验收与回归脚本还没写
-├── tools/                 空目录
+│   ├── tihu-core/         仿真内核。无 IO，无网络，无外部依赖。约九千行
+│   ├── tihu-cli/          占位。只有 fn main() {}
+│   └── tihu-wasm/         C ABI。手写导出，不引 wasm-bindgen
+├── web/                   页面源码。原生 JS，没有构建步骤
+├── dist/                  构建产物，不入库，由 make web 生成
+├── benches/               空。criterion 基准还没写
+├── harness/               空。验收与回归脚本还没写
+├── tools/                 构建与校验脚本：embed、smoke、verify-merge
 └── docs/
 ```
 
-**现在只有 `tihu-core` 有内容。** 其余目录都是空的或者只有占位。`web/` 将来也不会有构建步骤、没有 npm、没有框架，改完刷新浏览器即可。
+**有实质逻辑的只有 `tihu-core`。** `tihu-wasm` 是一层手写的 C ABI 转发，`tihu-cli`
+还是占位。`web/` 没有构建步骤、没有 npm、没有框架，改完刷新浏览器即可。
 
 `tihu-core` 的模块分工：
 
@@ -271,7 +274,10 @@ type DynRouter = Box<dyn Router>;
 
 ### 6.4 注册表
 
-网页下拉框与命令行 `--router` 参数将来从同一张表里读选。这张表目前只有 `builtin.rs` 里的一份内建实现清单，按名字在运行时选用还没接上。加一个新算法就加一个类型，不需要改动内核的其他地方。
+网页下拉框与 `tihu_run` 的第四个参数从同一张表里选：`tihu-wasm/src/lib.rs` 的
+`ROUTERS`，按下标取名字，再在 `dispatch` 里分到具体的泛型实例上。加一个新算法要动
+三处：内核里加类型、表里加一行、`dispatch` 与 `dispatch_batch` 各加一条分支。
+`tihu-core` 不认识名字，它只认类型，这样内核不必为一个 UI 需求引入字符串匹配。
 
 ---
 
@@ -298,11 +304,17 @@ WASM 内部依次跑完中间每个种子再汇总，一次性返回一份聚合
 
 ### 7.3 初始化
 
-```
-await WebAssembly.instantiateStreaming(fetch('tihu_core_bg.wasm'), imports)  // 走 network
+```js
+await WebAssembly.instantiateStreaming(fetch("tihu.wasm"), {})  // 走 network
 ```
 
-单文件版在 `file://` 下没有 fetch 权限，改成 base64 内嵌加 `WebAssembly.compile(bytes)`。**这是「双击就能玩」能成立的技术前提**，README 里承诺的那一点靠它实现。
+第二个参数永远是空对象。这个模块没有任何导入项，`tools/smoke.js` 头一条就查这件事，
+将来谁不小心引了一个外部符号，冒烟会先红。文件名是 `make wasm` 摆到 `web/` 下的
+`tihu.wasm`，源码里的 crate 叫 `tihu-wasm`。
+
+单文件版在 `file://` 下没有 fetch 权限，改成 base64 内嵌，解成字节再调
+`WebAssembly.instantiate(bytes, {})`。**这是「双击就能玩」能成立的技术前提**，
+README 里承诺的那一点靠它实现。
 
 ---
 
