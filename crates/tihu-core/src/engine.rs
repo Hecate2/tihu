@@ -376,10 +376,13 @@ impl World {
             !cfg.cars.is_empty(),
             "至少要有一台轿厢，先跑 Config::validate"
         );
+        // 先夹取再量几何。反过来会让楼层格位与 `cfg.building.top_level`
+        // 对不上：sanitized() 会把小于 2 的 top_level 抬到 2，而 n_levels
+        // 是按旧值算的，生成出来的乘客落在数组外面
+        let cfg = cfg.sanitized();
         let basement = cfg.building.basement_levels.max(0);
         let top = cfg.building.top_level;
         let n_levels = (top + basement + 1) as usize;
-        let cfg = cfg.sanitized();
 
         let mut w = World {
             pax: Vec::with_capacity(cfg.expected_trips() + 16),
@@ -696,6 +699,14 @@ impl World {
     #[inline]
     pub fn qidx(&self, level: i16) -> usize {
         (level + self.basement) as usize
+    }
+
+    /// 这一层在楼里吗。层号 0 不存在，有地下层时也照样排除。
+    ///
+    /// `qidx` 只做加法，调用方拿到的层号得先过这一关再当下标用。
+    #[inline]
+    pub fn in_bounds(&self, level: i16) -> bool {
+        level != 0 && level >= -self.basement && level <= self.top
     }
 
     fn car_brief(&self, id: CarId) -> CarBrief {
@@ -1193,6 +1204,26 @@ mod tests {
         assert_eq!(w.cars.len(), cfg.cars.len());
         assert_eq!(w.hall.len(), w.n_levels);
         assert_eq!(w.calls.calls.capacity(), 0, "预分配后不该立刻扩容");
+    }
+
+    /// 几何要从夹取之后的配置来量。`sanitized()` 会把顶层号抬到 2，
+    /// 若先按旧值算格位数，生成出来的乘客就落在数组外面。
+    #[test]
+    fn world_geometry_follows_sanitized_config() {
+        let mut c = Config::default();
+        c.building.top_level = 1;
+        c.building.units_per_floor = vec![4];
+        c.traffic.window_s = 300.0;
+        c.sim.horizon_s = 300.0;
+        let w = World::new(c);
+        assert_eq!(w.cfg.building.top_level, 2, "前提：夹取把顶层号抬到 2");
+        assert_eq!(w.top, 2, "世界的顶层要跟夹取后的配置一致");
+        assert_eq!(w.n_levels, 3);
+        assert!(w.calls.slots.len() >= w.n_levels * 2, "外呼槽位要覆盖全楼");
+        assert!(
+            w.pax.iter().all(|p| w.in_bounds(p.from) && w.in_bounds(p.to)),
+            "乘客的起终点都要在楼里"
+        );
     }
 
     /// 层间交通的总人数是「常驻人数 × 出行率」。团人数只决定这些人怎么

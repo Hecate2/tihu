@@ -91,8 +91,8 @@ pub fn run<R: Router, A: Assigner, B: Boarding>(
     // `stair_users` 一致，见 MODEL 9.2。中途弃梯的在 `abandon_to_stairs`
     // 里另加，两边合起来才等于全局那个数
     for p in &w.pax {
-        if p.used_stairs {
-            let qi = w.qidx(p.from).clamp(0, w.n_levels - 1);
+        if p.used_stairs && w.in_bounds(p.from) {
+            let qi = w.qidx(p.from);
             metrics.by_floor[qi].stair_users += 1;
         }
     }
@@ -164,7 +164,7 @@ pub fn run<R: Router, A: Assigner, B: Boarding>(
                     continue;
                 }
                 let level = w.pax[pid].from;
-                if level < -w.basement || level > w.top {
+                if !w.in_bounds(level) {
                     continue;
                 }
                 let qi = w.qidx(level);
@@ -397,6 +397,11 @@ fn abandon_to_stairs(w: &mut World, pid: usize, metrics: &mut Metrics) {
     }
     let level = w.pax[pid].from;
     let to = w.pax[pid].to;
+    // 楼外的乘客没有电梯厅可退，也没有逐层样本可记。正常配置到不了这里，
+    // 越界的畸形乘客才会，丢掉比把下标打穿好
+    if !w.in_bounds(level) {
+        return;
+    }
     let stairs = w.cfg.stairs.clone();
     let floors = (to - level).abs();
     // 可行性上限：没人会爬二十层楼梯去上班。超过这个层数就不许弃梯，
@@ -3192,5 +3197,29 @@ mod tests {
             let span = (p.hops[0].to - p.hops[0].from).abs();
             assert!(span <= 6, "超过步层上限还弃梯了：{} 层跨度", span);
         }
+    }
+
+    /// 顶层号被夹取抬高的配置，弃梯计时器到点也不许把下标打穿。
+    ///
+    /// `World::new` 先量几何再夹取时，这里会 panic 在 `abandon_to_stairs`
+    /// 的 `by_floor[qidx(level)]` 上，因为格位数按抬升前的顶层号算。
+    #[test]
+    fn abandon_in_a_lifted_building_keeps_indices_in_range() {
+        let mut c = Config::default();
+        c.building.top_level = 1;
+        c.building.units_per_floor = vec![4];
+        c.traffic.window_s = 120.0;
+        c.sim.horizon_s = 900.0;
+        // 让弃梯计时器落在仿真窗口里，走到 abandon_to_stairs 那条路
+        c.stairs.abandon_after_s = 5.0;
+        let r = quick(c, 1);
+        assert!(r.metrics.pax_total > 0, "前提：世界里得有人");
+        assert!(
+            r.world
+                .pax
+                .iter()
+                .all(|p| r.world.in_bounds(p.from) && r.world.in_bounds(p.to)),
+            "生成出来的乘客不能落在楼外"
+        );
     }
 }
