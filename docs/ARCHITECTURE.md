@@ -348,7 +348,7 @@ state = 全部输入参数的一个对象
 - 64 个种子起把范围切成几段，每个 Web Worker 各带一份 WASM 实例算一段，
   主线程按 `web/merge.js` 合成一份报告。合并口径对照内核 `batch.rs`，
   与一次跑完相比小数部分差 0.001 以内，个数类字段在半数边界上可能差 1。
-  node 以真实产物实测三组配置乘三组算法，见 `tools/verify-merge.js`。
+  node 以真实产物实测两组种子范围乘表里每一个算法，算法表从产物里读，见 `tools/verify-merge.js`。
 
 工人起不来就回退同步，保证旧环境照样出数。种子范围仍卡在 1000，
 见 `crates/tihu-core/src/config.rs` 的 `MAX_SEEDS`。

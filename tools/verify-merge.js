@@ -25,7 +25,14 @@ const mergeReports = globalThis.mergeReports;
   const run = (cfg, router) => pass(JSON.stringify(cfg), (p, n) => JSON.parse(take(e.tihu_run(p, n, router))));
   const cfg0 = JSON.parse(take(e.tihu_config(0)));
 
-  for (const [from, to, router] of [[42, 141, 0], [7, 106, 1], [1, 64, 2]]) {
+  // 算法表从产物里读，删掉一个算法这个脚本就少跑一组，不会留下一个
+  // 越界的下标静默退回默认算法
+  const routers = JSON.parse(take(e.tihu_config(2)));
+  const cases = [];
+  for (const [from, to] of [[42, 141], [7, 106]]) {
+    routers.forEach((row, router) => cases.push({ from, to, router, name: row.name }));
+  }
+  for (const { from, to, router, name } of cases) {
     const full = Object.assign({}, cfg0, { sim: Object.assign({}, cfg0.sim, { seed: from, seed_to: to }) });
     const want = run(full, router).sim;
     // 切 4 段
@@ -73,7 +80,7 @@ const mergeReports = globalThis.mergeReports;
     }
     const ok = worst < 0.01 && worstInt <= 1 && histDiff === 0
       && got.runs === want.runs && got.seed_from === want.seed_from && got.seed_to === want.seed_to;
-    console.log(`种子 ${from}..${to} router=${router}：小数最大差 ${worst.toFixed(4)}（${where}），整数最大差 ${worstInt}（${whereInt}），直方图差 ${histDiff}，${ok ? "ok" : "FAIL"}`);
+    console.log(`种子 ${from}..${to} ${name}：小数最大差 ${worst.toFixed(4)}（${where}），整数最大差 ${worstInt}（${whereInt}），直方图差 ${histDiff}，${ok ? "ok" : "FAIL"}`);
     if (!ok) process.exit(1);
   }
 })().catch((err) => { console.error("FAIL", err); process.exit(1); });
