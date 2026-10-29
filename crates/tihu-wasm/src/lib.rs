@@ -373,7 +373,7 @@ impl SimReport {
 /// `wait.p99` 的形式出现。
 fn downsample(s: &Summary, bin_s: f64, n: usize) -> Vec<u32> {
     let (bins, w) = s.histogram();
-    downsample_bins(&bins, w, bin_s, n)
+    downsample_bins(bins, w, bin_s, n)
 }
 
 /// 把已经合好的一张 0.5 秒级直方图压成 `bin_s` 秒一格，只留前 `n` 格。

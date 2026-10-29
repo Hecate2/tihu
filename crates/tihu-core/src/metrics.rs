@@ -151,9 +151,10 @@ impl Summary {
         self.overflow_sum += o.overflow_sum;
     }
 
-    /// 直方图快照，供网页画图。
-    pub fn histogram(&self) -> (Vec<u32>, f64) {
-        (self.bins.clone(), BIN)
+    /// 直方图，供网页画图。只读，所以借出去，调用方不必为一次读图克隆
+    /// 一千二百格。
+    pub fn histogram(&self) -> (&[u32], f64) {
+        (&self.bins, BIN)
     }
 }
 
