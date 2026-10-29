@@ -11,13 +11,6 @@
 
 let ex = null; // 本工人的 WASM 导出表
 
-function b64ToBytes(b64) {
-  const bin = atob(b64);
-  const out = new Uint8Array(bin.length);
-  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
-  return out;
-}
-
 // 与 app.js 同一份「长度前缀 + UTF-8」胶水。工人侧自带，不依赖主线程。
 function take(ptr) {
   if (ptr === 0) throw new Error("内核交回了空指针");
@@ -45,8 +38,8 @@ onmessage = async (e) => {
   const m = e.data || {};
   if (m.type === "init") {
     try {
-      const bytes = typeof m.wasmB64 === "string" ? b64ToBytes(m.wasmB64) : m.wasmBytes;
-      const { instance } = await WebAssembly.instantiate(bytes, {});
+      // 主线程一律发字节。单文件版走 base64 的是主线程那一侧，不是这里
+      const { instance } = await WebAssembly.instantiate(m.wasmBytes, {});
       ex = instance.exports;
       postMessage({ type: "ready" });
     } catch (err) {

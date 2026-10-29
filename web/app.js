@@ -108,14 +108,19 @@ function profileFor(v) {
   return best ? [best.a, best.j] : [0.8, 1.0];
 }
 
-const ui = {};
-for (const id of [
-  "preset", "res_floors", "units", "ppu", "fh", "basement", "gfr",
+// 改了要重算的控件。这份清单同时用来挂监听，界面上的输入框与这里的名字
+// 一一对应，加控件只改这一处。
+const LIVE_IDS = [
+  "res_floors", "units", "ppu", "fh", "basement", "gfr",
   "ncars", "load", "speed", "stops",
   "pattern", "dep", "window", "ret",
   "stairs", "pressb", "overload",
   "router", "seed", "seed_count",
-]) {
+];
+
+const ui = {};
+// 预设下拉框只换配置、不影响重算，所以只进 ui 不进 LIVE_IDS
+for (const id of ["preset", ...LIVE_IDS]) {
   ui[id] = document.getElementById(id);
 }
 
@@ -786,9 +791,7 @@ async function main() {
   });
 
   const kick = debounce(() => run(), 90);
-  for (const id of ["res_floors", "units", "ppu", "fh", "basement", "gfr", "ncars", "load",
-    "speed", "stops", "pattern", "dep", "window", "ret", "stairs", "pressb", "overload",
-    "router", "seed", "seed_count"]) {
+  for (const id of LIVE_IDS) {
     ui[id].addEventListener("input", () => { syncLabels(); kick(); });
     ui[id].addEventListener("change", () => { syncLabels(); kick(); });
   }
