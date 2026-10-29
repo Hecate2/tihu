@@ -450,18 +450,26 @@ struct Response {
     sim: Option<SimReport>,
 }
 
+/// 串成 JSON。
+///
+/// 这里交出去的全是普通结构体、字符串与标量，没有非字符串的键，浮点里的
+/// 非有限值 serde 也只会写成 `null`，所以序列化不会失败。真失败就 abort，
+/// 比悄悄交一份空数组让网页画不出东西要清楚。
+fn json<T: Serialize>(v: &T) -> String {
+    serde_json::to_string(v).expect("JSON 序列化不会失败")
+}
+
 fn fail(code: &'static str, message: String) -> String {
-    serde_json::to_string(&Response {
+    json(&Response {
         ok: false,
         issues: vec![IssueDto { severity: "error", code, message, level: None }],
         sim: None,
     })
-    .unwrap_or_else(|_| r#"{"ok":false,"issues":[]}"#.to_string())
 }
 
 /// 默认配置的 JSON。网页开局就拉这一份，之后只改用户动过的字段。
 pub fn default_config_json() -> String {
-    serde_json::to_string(&Config::default()).unwrap_or_else(|_| "{}".to_string())
+    json(&Config::default())
 }
 
 /// 全部预设的名字与中文说明。
@@ -472,7 +480,7 @@ pub fn presets_json() -> String {
             serde_json::json!({ "name": n, "label": preset_label(n) })
         })
         .collect();
-    serde_json::to_string(&list).unwrap_or_else(|_| "[]".to_string())
+    json(&list)
 }
 
 /// 预设的中文说明。只在网页的下拉框里出现。
@@ -492,7 +500,7 @@ fn preset_label(name: &str) -> &'static str {
 /// 某个预设的配置 JSON。
 pub fn preset_config_json(name: &str) -> String {
     match tihu_core::config::preset(name) {
-        Some(c) => serde_json::to_string(&c).unwrap_or_else(|_| "{}".to_string()),
+        Some(c) => json(&c),
         None => fail("unknown_preset", format!("没有叫 {name} 的预设")),
     }
 }
@@ -503,7 +511,7 @@ pub fn routers_json() -> String {
         .iter()
         .map(|r| serde_json::json!({ "name": r.name, "label": r.label, "desc": r.desc }))
         .collect();
-    serde_json::to_string(&list).unwrap_or_else(|_| "[]".to_string())
+    json(&list)
 }
 
 /// 常用速度档位，供网页在速度输入框下面给建议。
@@ -512,7 +520,7 @@ pub fn speed_tiers_json() -> String {
         .iter()
         .map(|t| serde_json::json!({ "v": t.0, "a": t.1, "j": t.2 }))
         .collect();
-    serde_json::to_string(&list).unwrap_or_else(|_| "[]".to_string())
+    json(&list)
 }
 
 /// 按表里那一行挑一套算法跑一次。
@@ -562,8 +570,7 @@ pub fn report_json(cfg_json: &str, router: &str) -> String {
     let v = cfg.validate();
     if !v.is_ok() {
         let issues: Vec<IssueDto> = v.issues.iter().map(IssueDto::of).collect();
-        return serde_json::to_string(&Response { ok: false, issues, sim: None })
-            .unwrap_or_else(|_| r#"{"ok":false,"issues":[]}"#.to_string());
+        return json(&Response { ok: false, issues, sim: None });
     }
     let cfg = cfg.sanitized();
     // 结束值大于根种子才走批量，否则照旧单跑，报告里一个批量字段都不出现
@@ -574,8 +581,7 @@ pub fn report_json(cfg_json: &str, router: &str) -> String {
         let run = dispatch(cfg, row.which);
         SimReport::of(&run, row.name)
     };
-    serde_json::to_string(&Response { ok: true, issues: vec![], sim: Some(sim) })
-        .unwrap_or_else(|_| r#"{"ok":false,"issues":[]}"#.to_string())
+    json(&Response { ok: true, issues: vec![], sim: Some(sim) })
 }
 
 // ---------------------------------------------------------------------------
