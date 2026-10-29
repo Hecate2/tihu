@@ -226,29 +226,27 @@ impl WeightMix {
     /// 抽一个分量，返回它的中位数与变异系数。
     ///
     /// `force_child` 为真时直接走小孩那一峰。同行团里带小孩的那几位走这条路径，
-    /// 保证相关性，不让「带小孩的团」变成大人小孩随机混。
+    /// 保证相关性，不让「带小孩的团」变成大人小孩随机混。配置里没有小孩那一峰
+    /// 时按份额抽，那是个正常结果，不是这里兜底。
     pub fn pick(&self, u: f64, force_child: bool) -> (f64, f64) {
         if force_child {
             if let Some(p) = self.peaks.iter().find(|p| p.kind == WeightKind::Child) {
                 return (p.median_kg, p.cv);
             }
         }
-        let total: f64 = self.peaks.iter().map(|p| p.share.max(0.0)).sum();
-        if total <= 0.0 {
-            return (65.0, 0.18);
-        }
+        // 至少一个分量、份额非负且总和大于 0，由 `validate` 保证
+        let total: f64 = self.peaks.iter().map(|p| p.share).sum();
         let target = u * total;
         let mut acc = 0.0;
         for p in &self.peaks {
-            acc += p.share.max(0.0);
+            acc += p.share;
             if target < acc {
                 return (p.median_kg, p.cv);
             }
         }
-        self.peaks
-            .last()
-            .map(|p| (p.median_kg, p.cv))
-            .unwrap_or((65.0, 0.18))
+        // u 正好落在 1.0 上时上面的循环不命中，按最后一峰算
+        let last = self.peaks.last().expect("校验保证至少有一个体重分量");
+        (last.median_kg, last.cv)
     }
 }
 
@@ -530,10 +528,8 @@ impl Default for StrategyMix {
 impl StrategyMix {
     /// 按比例抽一个策略。用独立的策略流，所以改算法不会挪位。
     pub fn pick(&self, u: f64) -> Strategy {
+        // 四项非负、之和大于 0，由 `validate` 保证
         let total = self.honest + self.press_both + self.press_up_only + self.multi_call;
-        if total <= 0.0 {
-            return Strategy::Honest;
-        }
         let mut acc = self.honest / total;
         if u < acc {
             return Strategy::Honest;
@@ -1146,6 +1142,34 @@ impl Config {
                 "物理极限人数不可能小于额定人数".into(),
             ));
         }
+        // 体重分量的份额是抽样比例。表为空或者份额全为 0 时，抽出来的体重
+        // 跟这栋楼的人没关系，所以在这里拦下，不在抽样函数里换一个默认值
+        if self.weight.peaks.is_empty() {
+            v.issues.push(Issue::error(
+                "weight_peaks",
+                "体重分布至少要有一个分量".into(),
+            ));
+        } else if self.weight.peaks.iter().any(|p| p.share < 0.0) {
+            v.issues
+                .push(Issue::error("weight_share", "体重分量的占比不能是负数".into()));
+        } else if self.weight.peaks.iter().map(|p| p.share).sum::<f64>() <= 0.0 {
+            v.issues.push(Issue::error(
+                "weight_share",
+                "体重分量的占比之和要大于 0".into(),
+            ));
+        }
+        // 策略占比同理
+        let s = &self.strategy;
+        if [s.honest, s.press_both, s.press_up_only, s.multi_call]
+            .iter()
+            .any(|x| *x < 0.0)
+        {
+            v.issues
+                .push(Issue::error("strategy_share", "策略占比不能是负数".into()));
+        } else if s.honest + s.press_both + s.press_up_only + s.multi_call <= 0.0 {
+            v.issues
+                .push(Issue::error("strategy_share", "策略占比之和要大于 0".into()));
+        }
         // 每一层都要有至少一台轿厢愿意停，否则那一层的人永远等不到车。
         // 层号 0 不存在，跳过
         for level in b.lowest_level()..=b.highest_level() {
@@ -1545,6 +1569,35 @@ mod tests {
                 "边界配置被夹取改动了"
             );
         }
+    }
+
+    /// 体重分量的份额是抽样比例，表空了就抽不出这栋楼的人。
+    #[test]
+    fn empty_weight_peaks_are_rejected() {
+        let mut c = Config::default();
+        c.weight.peaks.clear();
+        let v = c.validate();
+        assert!(!v.is_ok(), "空的体重分布应当被挡下");
+        assert!(v.errors().any(|i| i.code == "weight_peaks"));
+    }
+
+    /// 份额全为零、策略占比全为零，都与「配置里写的」不是一回事，要当场报错。
+    #[test]
+    fn zero_shares_are_rejected() {
+        let mut c = Config::default();
+        for p in &mut c.weight.peaks {
+            p.share = 0.0;
+        }
+        c.strategy = StrategyMix {
+            honest: 0.0,
+            press_both: 0.0,
+            press_up_only: 0.0,
+            multi_call: 0.0,
+        };
+        let v = c.validate();
+        assert!(!v.is_ok());
+        assert!(v.errors().any(|i| i.code == "weight_share"));
+        assert!(v.errors().any(|i| i.code == "strategy_share"));
     }
 
     /// 户数超过防呆上限要报错，不能放行之后悄悄削到 32。
