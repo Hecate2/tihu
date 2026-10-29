@@ -67,12 +67,11 @@ const ROUTERS: &[RouterRow] = &[
 ];
 
 /// 取三位小数。报告只用于显示，多余的位数只是把 JSON 撑大。
+///
+/// 这里不拦非有限值。拦了等于把 NaN 抹成 0，报告看起来正常，其实是假的。
+/// 真出了非有限数，`report_has_no_nan` 会当场红。
 fn r3(x: f64) -> f64 {
-    if x.is_finite() {
-        (x * 1000.0).round() / 1000.0
-    } else {
-        0.0
-    }
+    (x * 1000.0).round() / 1000.0
 }
 
 /// 一组时间样本的摘要。直方图不进报告。
@@ -924,11 +923,15 @@ mod tests {
         assert_eq!(a, b, "同一个种子的两次报告必须一模一样");
     }
 
-    /// 报告里不许出现 NaN。JSON 装不下 NaN，网页画图会直接炸。
+    /// 报告里的数字都必须是有限值。
+    ///
+    /// JSON 装不下 NaN 与无穷，serde 把它们写成 `null`。这个结构里没有一处
+    /// 该是 null：`Option` 字段用的是 `skip_serializing_if`，空值直接不出现。
+    /// 所以查 `null` 就等于查非有限数。
     #[test]
     fn report_has_no_nan() {
         let r = report_json(&default_config_json(), "down_peak_sweep");
-        assert!(!r.contains("NaN"), "报告里出现了 NaN：{r}");
+        assert!(!r.contains("NaN") && !r.contains("null"), "报告里有非有限值：{r}");
     }
 
     /// 缓冲区的前四字节就是负载长度，JS 按这个读。
