@@ -321,24 +321,19 @@ impl<A: Assigner> Assigner for RescueWrapper<A> {
 
     fn reassign(&self, v: &SystemView<'_>, owned: &mut [Option<CarId>]) {
         self.inner.reassign(v, owned);
-        if v.cars.iter().any(|c| c.stalled && c.stall_for > self.threshold_s) {
-            // 找出所有指向僵死轿厢的外呼，改派给最闲的一台
-            let victims: Vec<usize> = owned
-                .iter()
-                .enumerate()
-                .filter(|(_, o)| o.is_some_and(|id| v.cars[id].stalled))
-                .map(|(i, _)| i)
-                .collect();
-            for i in victims {
-                let free: Vec<CarId> = v
-                    .cars
-                    .iter()
-                    .filter(|c| !c.stalled)
-                    .map(|c| c.id)
-                    .collect();
-                if let Some(&target) = free.iter().min_by_key(|&&id| v.cars[id].load) {
-                    owned[i] = Some(target);
-                }
+        if !v.cars.iter().any(|c| c.stalled && c.stall_for > self.threshold_s) {
+            return;
+        }
+        // 指向僵死轿厢的外呼改派给负载最小的活轿厢。载客数是视图里的定值，
+        // 改派不会改它，所以目标挑一次就够，不必每救一条重挑一遍
+        let Some(target) = v.cars.iter().filter(|c| !c.stalled).min_by_key(|c| c.load) else {
+            // 全都僵着，没地方可送
+            return;
+        };
+        let target = target.id;
+        for o in owned.iter_mut() {
+            if o.is_some_and(|id| v.cars[id].stalled) {
+                *o = Some(target);
             }
         }
     }
@@ -569,6 +564,18 @@ mod tests {
         // 原本指向卡死 0 号的两条都该被救走
         assert_eq!(owned[0], Some(1));
         assert_eq!(owned[2], Some(1));
+    }
+
+    /// 全都僵着时无处可送，归属原样留着，不能派给任何一台。
+    #[test]
+    fn rescue_wrapper_leaves_calls_alone_when_every_car_is_stalled() {
+        let mut owned = vec![Some(0), Some(1), None];
+        let v = system(
+            vec![brief(0, 10.0, Dir::None, 13, true), brief(1, 12.0, Dir::None, 2, true)],
+            vec![],
+        );
+        RescueWrapper::new(NearestCar).reassign(&v, &mut owned);
+        assert_eq!(owned, vec![Some(0), Some(1), None]);
     }
 
     /// 不救活的派梯什么都不做，这是两种算法的差别所在。
