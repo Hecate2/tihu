@@ -548,20 +548,6 @@ impl StrategyMix {
         }
         Strategy::MultiCall
     }
-
-    /// 归一化后的四元组，供演化更新使用。
-    pub fn normalized(&self) -> [f64; 4] {
-        let total = self.honest + self.press_both + self.press_up_only + self.multi_call;
-        if total <= 0.0 {
-            return [1.0, 0.0, 0.0, 0.0];
-        }
-        [
-            self.honest / total,
-            self.press_both / total,
-            self.press_up_only / total,
-            self.multi_call / total,
-        ]
-    }
 }
 
 /// 走楼梯的配置。
@@ -1708,18 +1694,6 @@ mod tests {
         };
         assert_eq!(unnormalized.pick(0.5), Strategy::Honest);
         assert_eq!(unnormalized.pick(0.9), Strategy::PressBoth);
-    }
-
-    #[test]
-    fn strategy_mix_normalizes() {
-        let m = StrategyMix {
-            honest: 2.0,
-            press_both: 2.0,
-            ..Default::default()
-        };
-        let n = m.normalized();
-        assert!((n.iter().sum::<f64>() - 1.0).abs() < 1e-12);
-        assert!((n[0] - 0.5).abs() < 1e-12);
     }
 
     #[test]
