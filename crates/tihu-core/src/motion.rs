@@ -101,18 +101,15 @@ pub struct Traverse {
     pub reached_rated: bool,
 }
 
-/// 加速到速度 `v` 所需的时间与位移。
+/// 在速度 `v` 与静止之间走完加减速段的耗时与位移，返回 `(时间, 距离)`。
+///
+/// 起步与停车共用这一个式子：剖面是对称的，把该方向的 `a` 与 `j` 代进去，
+/// 从 0 升到 `v` 和从 `v` 降到 0 的时间与路程一模一样。两者的区别只在
+/// 拿哪一组参数，所以不写两遍。
 #[inline]
-fn accel_to(v: f32, a: f32, j: f32) -> (f64, f64) {
-    let t = v as f64 / a as f64 + a as f64 / j as f64;
-    let d = v as f64 * v as f64 / (2.0 * a as f64) + v as f64 * a as f64 / (2.0 * j as f64);
-    (t, d)
-}
-
-/// 从速度 `v` 减速停车的耗时与位移。
-#[inline]
-fn decel_from(v: f32, a: f32, j: f32) -> (f64, f64) {
-    (v as f64 / a as f64 + a as f64 / j as f64, v as f64 * v as f64 / (2.0 * a as f64) + v as f64 * a as f64 / (2.0 * j as f64))
+fn ramp(v: f64, a: f32, j: f32) -> (f64, f64) {
+    let (a, j) = (a as f64, j as f64);
+    (v / a + a / j, v * v / (2.0 * a) + v * a / (2.0 * j))
 }
 
 /// 走 `dist` 米要多久。
@@ -124,8 +121,8 @@ pub fn traverse_time(dist: f64, p: MotionProfile) -> Traverse {
     if dist <= 0.0 {
         return Traverse { time: 0.0, peak_speed: 0.0, reached_rated: false };
     }
-    let (t_acc, d_acc) = accel_to(p.v_max, p.a_acc, p.j_acc);
-    let (t_dec, d_dec) = decel_from(p.v_max, p.a_dec, p.j_dec);
+    let (t_acc, d_acc) = ramp(p.v_max as f64, p.a_acc, p.j_acc);
+    let (t_dec, d_dec) = ramp(p.v_max as f64, p.a_dec, p.j_dec);
 
     if dist >= d_acc + d_dec {
         let cruise = (dist - d_acc - d_dec) / p.v_max as f64;
@@ -137,8 +134,8 @@ pub fn traverse_time(dist: f64, p: MotionProfile) -> Traverse {
     let bb = p.a_acc as f64 / (2.0 * p.j_acc as f64) + p.a_dec as f64 / (2.0 * p.j_dec as f64);
     let disc = bb * bb + 4.0 * aa * dist;
     let v_p = ((-bb + disc.sqrt()) / (2.0 * aa)) as f32;
-    let (t1, _) = accel_to(v_p, p.a_acc, p.j_acc);
-    let (t2, _) = decel_from(v_p, p.a_dec, p.j_dec);
+    let (t1, _) = ramp(v_p as f64, p.a_acc, p.j_acc);
+    let (t2, _) = ramp(v_p as f64, p.a_dec, p.j_dec);
     Traverse { time: t1 + t2, peak_speed: v_p, reached_rated: false }
 }
 
@@ -148,10 +145,11 @@ pub fn traverse_time(dist: f64, p: MotionProfile) -> Traverse {
 #[inline]
 pub fn decel_distance(v: f64, p: MotionProfile) -> f64 {
     let p = p.sanitized();
-    v * v / (2.0 * p.a_dec as f64) + v * p.a_dec as f64 / (2.0 * p.j_dec as f64)
+    ramp(v, p.a_dec, p.j_dec).1
 }
 
 /// 一段行程的相位分解。位置与速度都由它推出来。
+#[derive(Debug, Clone, Copy, Default)]
 struct LegPhases {
     /// 走完全程的时刻
     total_t: f64,
@@ -170,15 +168,17 @@ struct LegPhases {
 /// 速度在加速段从 0 线性升到 `v_peak`，减速段再线性降到 0。这样
 /// `d_acc = v_peak·t_acc/2` 与 `docs/MODEL.md` 第 3.2 节的算式自然吻合。
 fn leg_phases(dist: f64, p: MotionProfile) -> LegPhases {
+    // `traverse_time` 自己会夹一次参数，这里再夹一次是为了后面那两个
+    // `ramp` 用的是同一组数。夹取是幂等的，多夹一次不要紧，但不能不夹：
+    // 外部直接传一条 `a_acc = 0` 的曲线进来，`ramp` 会算出无穷大。
+    let p = p.sanitized();
     if dist <= 0.0 {
-        return LegPhases { total_t: 0.0, v_peak: 0.0, t_acc: 0.0, d_acc: 0.0, t_cruise: 0.0, d_cruise: 0.0, t_dec: 0.0, d_dec: 0.0 };
+        return LegPhases::default();
     }
     let tr = traverse_time(dist, p);
     let v = tr.peak_speed as f64;
-    let t_acc = v / p.a_acc as f64 + p.a_acc as f64 / p.j_acc as f64;
-    let d_acc = v * v / (2.0 * p.a_acc as f64) + v * p.a_acc as f64 / (2.0 * p.j_acc as f64);
-    let t_dec = v / p.a_dec as f64 + p.a_dec as f64 / p.j_dec as f64;
-    let d_dec = decel_distance(v, p);
+    let (t_acc, d_acc) = ramp(v, p.a_acc, p.j_acc);
+    let (t_dec, d_dec) = ramp(v, p.a_dec, p.j_dec);
     let d_cruise = (dist - d_acc - d_dec).max(0.0);
     let t_cruise = if v > 0.0 { d_cruise / v } else { 0.0 };
     LegPhases { total_t: tr.time, v_peak: v, t_acc, d_acc, t_cruise, d_cruise, t_dec, d_dec }
@@ -451,5 +451,27 @@ mod tests {
             assert!(t >= prev, "距离 {k} 层时耗时反而变短");
             prev = t;
         }
+    }
+
+    /// 走 `d` 米对应的时刻，代回 `state_at` 应当还是 `d`。三段各取一点。
+    #[test]
+    fn distance_and_time_are_inverse() {
+        let p = MotionProfile::default();
+        let dist = 30.0;
+        // 加速段 0.5 米、3 米，匀速段 12 米、24 米，减速段 28.5 米、30 米
+        for &d in &[0.5, 3.0, 12.0, 24.0, 28.5, 30.0] {
+            let t = time_at_distance(dist, p, d);
+            let (got, _) = state_at(dist, p, t);
+            assert!((got - d).abs() < 1e-6, "{d} 米反解回的是 {got}");
+        }
+    }
+
+    /// 曲线没夹过就传进来时，相位分解不能算出无穷大。
+    #[test]
+    fn unsanitized_profile_stays_finite() {
+        let p = MotionProfile { v_max: 1.75, a_acc: 0.0, a_dec: 0.0, j_acc: 0.0, j_dec: 0.0 };
+        let (d, v) = state_at(30.0, p, 2.0);
+        assert!(d.is_finite() && v.is_finite(), "未夹取的曲线把结果算成了 {d} / {v}");
+        assert!(time_at_distance(30.0, p, 10.0).is_finite());
     }
 }
