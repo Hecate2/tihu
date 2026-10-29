@@ -41,9 +41,16 @@ impl Default for Summary {
 
 impl Summary {
     /// 加一个样本。
+    ///
+    /// 时间不可能为负，负值说明上游算错。丢掉比收下好：负样本进不了直方图
+    /// （分桶下标为负），却会进 `count` 与 `sum`，于是均值、分位数、标准差
+    /// 三个数各说各话。
     #[inline]
     pub fn add(&mut self, x: f64) {
         if !x.is_finite() {
+            return;
+        }
+        if x < 0.0 {
             return;
         }
         self.count += 1;
@@ -51,9 +58,6 @@ impl Summary {
         self.max = self.max.max(x);
         self.min = self.min.min(x);
         let idx = (x / BIN).floor();
-        if idx < 0.0 {
-            return;
-        }
         if idx < NBINS as f64 {
             self.bins[idx as usize] += 1;
         } else {
@@ -282,6 +286,21 @@ mod tests {
         assert!((s.mean() - 50.0).abs() < 0.5);
         assert!((s.min - 0.0).abs() < 1e-9);
         assert!((s.max - 100.0).abs() < 1e-9);
+    }
+
+    /// 负样本直接丢掉。收下的话它进不了直方图，却会进均值，三个数就对不上。
+    #[test]
+    fn negative_samples_are_dropped() {
+        let mut s = Summary::default();
+        for x in [1.0, 2.0, 3.0, -10.0] {
+            s.add(x);
+        }
+        assert_eq!(s.count, 3, "负样本不该进样本数");
+        assert!((s.mean() - 2.0).abs() < 1e-12, "均值只该算三个正样本");
+        assert!((s.min - 1.0).abs() < 1e-12);
+        assert!((s.max - 3.0).abs() < 1e-12);
+        // 2 秒落在第 4 格，中心是 2.25
+        assert!((s.p50() - 2.25).abs() < 1e-12);
     }
 
     #[test]
