@@ -147,7 +147,7 @@ CUDA 锁死 NVIDIA，HIP 锁死 AMD。都不支持苹果。用了它们，「多
 | --- | --- |
 | 转向层 | `reversal_floor` 记了，但没有真正按它约束行程。反向叫梯者应该一路坐到折返点再下来，现在靠路由自然带过去 |
 | 同行团 | `party_window_s` 是空参数。同户乘客按户聚合了，但没有按到达时间窗并团 |
-| 满载直驶 | 只在 `selective_collective` 里有，默认算法组合里没开 |
+| 满载直驶 | 已接上，是 `sim::step_car` 里的内核行为，与走哪个 router 无关。早先另有一个只做直驶的 router，实测与集选逐位相同，已删 |
 | 多呼多台 | 只在独立面板下成立，且固定呼叫两台 |
 | 逐日演化 | `Sim::days` 与 `StrategyMix::evolution_epsilon` 没有消费者 |
 | 现场校准 | 没有 `calibrate`，所有待标定常数仍是行业经验值 |

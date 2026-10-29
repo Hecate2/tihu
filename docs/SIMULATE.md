@@ -78,8 +78,8 @@ c.sim.seed = 7;
 [`MODEL.md`](MODEL.md)。
 
 换调度算法要改用 `sim::run`，把你自己的 `Router`、`Assigner`、`Boarding` 传进去。
-写法见 [`DISPATCH_API.md`](DISPATCH_API.md)。网页下拉框里那三个的名字是
-`down_peak_sweep`、`collective_scan`、`selective_collective`。
+写法见 [`DISPATCH_API.md`](DISPATCH_API.md)。网页下拉框里那两个的名字是
+`down_peak_sweep`、`collective_scan`。
 
 ---
 

@@ -10,6 +10,11 @@ use crate::policy::{AdmitSample, Assigner, Boarding, CarId, HallCall, Leg, RunVi
 /// 经典集选。保持方向，把沿途同向外呼和内选服务完，到底才反向。
 ///
 /// 这是住宅楼的默认做法。老楼装的就是它。
+///
+/// 满载直驶不在这里，也不在任何 router 里：它是内核行为，`sim::step_car`
+/// 在车满员时把路过的同向外呼从停靠表里划掉。router 只能改这一腿的目标层，
+/// 而 `plan_leg` 会重新把名下的顺路外呼排进停靠表，所以想在 router 这一层
+/// 做直驶是做不到的。
 #[derive(Debug, Default, Clone)]
 pub struct CollectiveScan;
 
@@ -85,58 +90,6 @@ fn fetch_nearest(v: &RunView<'_>) -> Leg {
         (Some(d), None) => Leg::Down(d),
         (None, Some(u)) => Leg::Up(u),
         (None, None) => Leg::Park,
-    }
-}
-
-/// 集选加满载直驶。载客率到阈值之后不再响应外呼，直接掠过。
-///
-/// 这一条直接对应 `docs/MODEL.md` 第 5.2 与 5.3 节的因果：多按出来的那条无用
-/// 外呼会把一台轿厢拉去跑冤枉路，满载直驶能挡掉一部分。
-#[derive(Debug, Clone)]
-pub struct SelectiveCollective {
-    /// 超过这个载客率就开始直驶
-    pub bypass_ratio: f64,
-}
-
-impl Default for SelectiveCollective {
-    fn default() -> Self {
-        // TODO(calibration) 满载直驶的触发点。行业上常见是按额定载重的八成上下
-        // 起跳，这里先按载客率 0.8。填 0 会让它整趟都不应答外呼，等于把这个
-        // 算法废掉，所以默认值不能取 0。
-        Self { bypass_ratio: 0.8 }
-    }
-}
-
-impl crate::policy::Router for SelectiveCollective {
-    fn name(&self) -> &'static str {
-        "selective_collective"
-    }
-
-    fn next_leg(&self, v: &RunView<'_>) -> Leg {
-        if v.load_ratio() < self.bypass_ratio {
-            return CollectiveScan.next_leg(v);
-        }
-        // 满载直驶：只按内选走，不再绕去外呼层。内选也没有就原地待命
-        let here = v.level();
-        let up = !matches!(v.heading, Dir::Down);
-        let above = v.highest_car_call().filter(|&t| t > here);
-        let below = v.lowest_car_call().filter(|&t| t < here);
-        if up {
-            if let Some(t) = above {
-                return Leg::Up(t);
-            }
-            if let Some(t) = below {
-                return Leg::Down(t);
-            }
-        } else {
-            if let Some(t) = below {
-                return Leg::Down(t);
-            }
-            if let Some(t) = above {
-                return Leg::Up(t);
-            }
-        }
-        Leg::Park
     }
 }
 
@@ -530,22 +483,6 @@ mod tests {
         assert_eq!(CollectiveScan.next_leg(&v), Leg::Park);
     }
 
-    /// 满载直驶时算法只按内选走，不再绕去外呼层。
-    #[test]
-    fn selective_bypasses_calls_when_full() {
-        let sc = SelectiveCollective { bypass_ratio: 0.8 };
-        // 13 人的轿厢装了 11 人，载客率 0.846，超过阈值
-        let full = rv(12.0, Dir::Up, vec![call(20, Dir::Up)], vec![], 11);
-        assert_eq!(sc.next_leg(&full), Leg::Park, "满载直驶时不该再跑去接外呼");
-    }
-
-    #[test]
-    fn selective_below_threshold_behaves_like_collective() {
-        let sc = SelectiveCollective { bypass_ratio: 0.8 };
-        let v = rv(12.0, Dir::Up, vec![call(20, Dir::Up)], vec![], 3);
-        assert_eq!(sc.next_leg(&v), Leg::Up(20));
-    }
-
     /// 下行扫描：下方没有任务时，先上行到最高的任务层。
     #[test]
     fn sweep_climbs_to_the_highest_pending() {
@@ -683,7 +620,6 @@ mod tests {
     fn router_names_are_unique() {
         let mut names: Vec<&str> = Vec::new();
         names.push(CollectiveScan.name());
-        names.push(SelectiveCollective::default().name());
         names.push(DownPeakSweep.name());
         let mut sorted = names.clone();
         sorted.sort_unstable();

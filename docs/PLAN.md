@@ -63,9 +63,13 @@
 
 - [x] 外呼注册表，按 `(楼层, 方向)` 去重
 - [x] 三个替换点 trait：`Assigner`、`Router`、`Boarding`
-- [x] 内建实现：`nearest_car`、`round_robin`、`eta_min`、`load_aware_eta`、`with_rescue`、`collective_scan`、`selective_collective`、`down_peak_sweep`
+- [x] 内建实现：`nearest_car`、`round_robin`、`eta_min`、`load_aware_eta`、`with_rescue`、`collective_scan`、`down_peak_sweep`
 - [x] 幽灵停站的产生与计数
-- [ ] 注册表，让命令行 `--router` 与网页下拉框共用。还没接上
+- [x] 注册表，让命令行 `--router` 与网页下拉框共用
+
+原先还有一个 `selective_collective`，想在 router 这一层做满载直驶。实测与集选
+逐位相同：router 只能改这一腿的目标层，停靠表由 `plan_leg` 按名下的外呼重排，
+绕不过去。满载直驶现在统一由 `sim::step_car` 处理，那个算法已删。
 
 **验收**
 

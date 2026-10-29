@@ -19,24 +19,23 @@ use tihu_core::metrics::{Metrics, Summary};
 use tihu_core::sim::{self, Run};
 
 /// 可选的走向算法。序号与网页下拉框一一对应。
-const ROUTERS: [&str; 3] = ["down_peak_sweep", "collective_scan", "selective_collective"];
+const ROUTERS: [&str; 2] = ["down_peak_sweep", "collective_scan"];
 
 /// 走向算法的中文说明。网页直接显示，不需要再维护第二份表。
-const ROUTER_LABELS: [&str; 3] = [
+const ROUTER_LABELS: [&str; 2] = [
     "定向扫楼：先上到顶再一路下行",
     "集选：沿一个方向走，沿途有人按就停",
-    "集选加满载直驶：载客率过 80% 就不再绕路",
 ];
 
 /// 走向算法的一句话解释。网页在下拉框下面单独开一块显示。
 ///
 /// 这里说的是**走向**，也就是车开出去之后往哪走。新按下的一条外呼分给哪台
-/// 轿厢由内核的派梯规则统一负责，三种算法在这一层完全一样，见
-/// `docs/DISPATCH_API.md`。名字不能混用，见 `AGENTS.md` 第 6 节的名词表。
-const ROUTER_DESCS: [&str; 3] = [
+/// 轿厢由内核的派梯规则统一负责，两种算法在这一层完全一样。满载直驶也是
+/// 内核行为，不是算法选项，见 `docs/DISPATCH_API.md`。名字不能混用，
+/// 见 `AGENTS.md` 第 6 节的名词表。
+const ROUTER_DESCS: [&str; 2] = [
     "先开到当前最高的那个呼叫层，再一路往下扫到最低。早高峰大家同时下楼时最省事，晚高峰要上楼的客流会被它绕远。",
     "轿厢认准一个方向走，路上有同向的呼叫就停，走到头再掉头。任何时段都能用，是住宅楼的通用选择。",
-    "先用集选的走法，等车里载客率超过 80% 就只送车上的人，不再拐去接新外呼。它能挡住一部分没人上车的白停靠。",
 ];
 
 /// 取三位小数。报告只用于显示，多余的位数只是把 JSON 撑大。
@@ -497,16 +496,8 @@ pub fn speed_tiers_json() -> String {
 /// 否则网页上根本没有旋钮能拧动拒挤曲线。
 fn dispatch(cfg: Config, router: &str) -> Run {
     let b = tihu_core::builtin::DefaultBoarding { cfg: cfg.boarding.clone() };
-    let selective = tihu_core::builtin::SelectiveCollective {
-        bypass_ratio: cfg.boarding.bypass_load_ratio,
-    };
     match router {
-        "collective_scan" => {
-            sim::run(cfg, &mut CollectiveScan, &mut LoadAwareEta::default(), &b)
-        }
-        "selective_collective" => {
-            sim::run(cfg, &mut selective.clone(), &mut LoadAwareEta::default(), &b)
-        }
+        "collective_scan" => sim::run(cfg, &mut CollectiveScan, &mut LoadAwareEta::default(), &b),
         _ => sim::run(cfg, &mut DownPeakSweep, &mut LoadAwareEta::default(), &b),
     }
 }
@@ -517,15 +508,9 @@ fn dispatch(cfg: Config, router: &str) -> Run {
 /// [`tihu_core::batch`]。
 fn dispatch_batch(cfg: Config, router: &str) -> SeedBatch {
     let b = tihu_core::builtin::DefaultBoarding { cfg: cfg.boarding.clone() };
-    let selective = tihu_core::builtin::SelectiveCollective {
-        bypass_ratio: cfg.boarding.bypass_load_ratio,
-    };
     match router {
         "collective_scan" => {
             batch::run_seeds(&cfg, &mut CollectiveScan, &mut LoadAwareEta::default(), &b)
-        }
-        "selective_collective" => {
-            batch::run_seeds(&cfg, &mut selective.clone(), &mut LoadAwareEta::default(), &b)
         }
         _ => batch::run_seeds(&cfg, &mut DownPeakSweep, &mut LoadAwareEta::default(), &b),
     }
