@@ -26,6 +26,13 @@ pub const BASEMENT_ENTRANCE_PROB: f64 = 0.07;
 /// 界面冻住太久。超出的范围在校验阶段挡掉。
 pub const MAX_SEEDS: u64 = 1000;
 
+/// 每层户数的防呆上限。
+///
+/// 这不是建模约束。十八户的大板楼合法，真正的人口密度约束在给了楼板面积时
+/// 由 [`Config::validate`] 按 MODEL 2.2 算。这个数只拦手误多打一个 0，
+/// 免得网页一次造出几十万乘客。校验与夹取共用这一条，不要各写一份。
+pub const MAX_UNITS_PER_FLOOR: u8 = 32;
+
 /// 一栋楼。
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -899,6 +906,15 @@ impl Issue {
             level: None,
         }
     }
+
+    fn error_at(code: &'static str, message: String, level: i16) -> Self {
+        Self {
+            severity: Severity::Error,
+            code,
+            message,
+            level: Some(level),
+        }
+    }
 }
 
 /// 校验结果。
@@ -960,6 +976,70 @@ impl Config {
             ));
         }
 
+        // 逐台轿厢。这里挡的几条与 sanitized() 的夹取一一对应：校验放过、
+        // 夹取又悄悄改掉，用户拿到的就是另一栋楼，报告里还看不出差别
+        for (i, c) in self.cars.iter().enumerate() {
+            let n = i + 1;
+            if !(1..=40).contains(&c.capacity_rated) {
+                v.issues.push(Issue::error(
+                    "capacity_rated",
+                    format!(
+                        "第 {n} 台轿厢的额定人数应在 1 到 40 之间，当前 {}",
+                        c.capacity_rated
+                    ),
+                ));
+            }
+            if !(100.0..=5000.0).contains(&c.rated_load_kg) {
+                v.issues.push(Issue::error(
+                    "rated_load",
+                    format!(
+                        "第 {n} 台轿厢的额定载重应在 100 到 5000 公斤之间，当前 {:.0}",
+                        c.rated_load_kg
+                    ),
+                ));
+            }
+            if c.initial_level == 0
+                || c.initial_level < b.lowest_level()
+                || c.initial_level > b.highest_level()
+            {
+                v.issues.push(Issue::error(
+                    "initial_level",
+                    format!(
+                        "第 {n} 台轿厢的初始层 {} 不在楼里。层号 0 不存在，可用范围是 {} 到 {}",
+                        c.initial_level,
+                        b.lowest_level(),
+                        b.highest_level()
+                    ),
+                ));
+            }
+            for (label, m) in [("上行", &c.up), ("下行", &c.down)] {
+                if !(0.1..=20.0).contains(&m.v_max) {
+                    v.issues.push(Issue::error(
+                        "speed_range",
+                        format!(
+                            "第 {n} 台轿厢的{label}额速应在 0.1 到 20 米每秒之间，当前 {:.2}",
+                            m.v_max
+                        ),
+                    ));
+                }
+                for (what, val, lo, hi) in [
+                    ("加速度", m.a_acc, 0.05f32, 5.0f32),
+                    ("减速度", m.a_dec, 0.05, 5.0),
+                    ("加速段加加速度", m.j_acc, 0.05, 20.0),
+                    ("减速段加加速度", m.j_dec, 0.05, 20.0),
+                ] {
+                    if !(lo..=hi).contains(&val) {
+                        v.issues.push(Issue::error(
+                            "motion_range",
+                            format!(
+                                "第 {n} 台轿厢的{label}{what}应在 {lo} 到 {hi} 之间，当前 {val:.3}"
+                            ),
+                        ));
+                    }
+                }
+            }
+        }
+
         // 户数表长度必须与最高层号一致。层号 1 是主入口层，也占一格
         if b.units_per_floor.len() != b.top_level as usize {
             v.issues.push(Issue::error(
@@ -971,39 +1051,53 @@ impl Config {
                 ),
             ));
         }
+        // 户数的防呆上限，与 sanitized() 同一条。只报第一层，免得八十层的楼
+        // 一次刷出八十条一样的错
+        if let Some((i, _)) = b
+            .units_per_floor
+            .iter()
+            .enumerate()
+            .find(|(_, &u)| u > MAX_UNITS_PER_FLOOR)
+        {
+            let level = i as i16 + 1;
+            v.issues.push(Issue::error_at(
+                "units_per_floor",
+                format!(
+                    "第 {level} 层设了 {} 户，防呆上限是 {MAX_UNITS_PER_FLOOR} 户。真有这么大的楼请分栋算",
+                    b.units_per_floor[i]
+                ),
+                level,
+            ));
+        }
 
         // 红线 5：层数、户数、户均人数不是三个自由变量
         if let Some(area) = b.floor_area_m2 {
             let max_units = (area / b.min_unit_area_m2).floor() as i32;
             let max_persons = (area / b.min_area_per_person_m2).floor() as i32;
             for level in 1..=b.top_level {
-                let idx = (level - 1) as usize;
-                let Some(&units) = b.units_per_floor.get(idx) else {
-                    continue;
-                };
-                let units = units as i32;
+                // 用 units_at 而不是原始表：顶层跃层要减半，关掉主入口层住户
+                // 要清零。密度检查得跟真正住进去的人数走
+                let units = b.units_at(level) as i32;
                 let persons = units as f32 * b.persons_per_unit;
                 if units > max_units {
-                    v.issues.push(Issue {
-                        severity: Severity::Error,
-                        code: "density_units",
-                        message: format!(
+                    v.issues.push(Issue::error_at(
+                        "density_units",
+                        format!(
                             "第 {} 层设了 {} 户。按最小套型 {:.0} m² 反推，这层至少要有 {:.0} m² 的套内面积才塞得下",
                             level,
                             units,
                             b.min_unit_area_m2,
                             units as f32 * b.min_unit_area_m2
                         ),
-                        level: Some(level),
-                    });
+                        level,
+                    ));
                 }
                 // 人均面积越接近下限越可疑。落在下限的一点五倍以内就提醒。
                 let per_person = area / persons.max(1.0);
                 if persons as i32 > max_persons {
-                    v.issues.push(Issue {
-                        severity: Severity::Error,
-                        code: "density_persons",
-                        message: format!(
+                    v.issues.push(Issue::error_at(
+                        "density_persons",
+                        format!(
                             "第 {} 层按每户 {:.1} 人算是 {:.0} 人。按人均 {:.0} m² 反推，这层至少要有 {:.0} m² 才合规",
                             level,
                             b.persons_per_unit,
@@ -1011,8 +1105,8 @@ impl Config {
                             b.min_area_per_person_m2,
                             persons * b.min_area_per_person_m2
                         ),
-                        level: Some(level),
-                    });
+                        level,
+                    ));
                 } else if per_person < b.min_area_per_person_m2 * 1.5 {
                     v.issues.push(Issue {
                         severity: Severity::Warn,
@@ -1139,6 +1233,13 @@ impl Config {
     }
 
     /// 把配置里明显不合理的值夹到合理范围。校验通过之后调用。
+    /// 把配置里明显不合理的值夹到合理范围。校验通过之后调用，此时应当
+    /// 什么都不改。
+    ///
+    /// 这里的每一条夹取，`validate` 里都有一条对应的错误。校验放过的值
+    /// 夹取就不该再动，否则用户拿到的是另一栋楼，而报告里看不出差别。
+    /// 夹取本身留着是给直调内核的路径：`World::new` 会自己夹一次，
+    /// 网页与 JSON 接口那条路先过校验，到不了这些边界。
     pub fn sanitized(mut self) -> Self {
         self.building.top_level = self.building.top_level.max(2);
         self.building.floor_height = self.building.floor_height.clamp(2.4, 6.0);
@@ -1148,17 +1249,10 @@ impl Config {
             self.building.units_per_floor.resize(n, 4);
         }
         for u in &mut self.building.units_per_floor {
-            // 防呆上限，不是建模约束。18 户这种大板楼合法，真正的人口密度约束
-            // 在给了楼板面积时由 validate() 按 MODEL 2.2 算。这个数只拦
-            // 手误多打一个 0 那种输入，免得网页一次造出几十万乘客卡死
-            *u = (*u).clamp(0, 32);
+            *u = (*u).min(MAX_UNITS_PER_FLOOR);
         }
-        // 主入口层不住人时，补表或夹取之后都要把这个约定恢复回来
-        if !self.building.ground_floor_residential {
-            if let Some(first) = self.building.units_per_floor.first_mut() {
-                *first = 0;
-            }
-        }
+        // 主入口层不住人这件事由 `units_at` 读表时清零，表里保留原值。
+        // 在这里改写首位等于让夹取改用户的输入，校验也就看不出差别了
         for c in &mut self.cars {
             c.up = c.up.sanitized();
             c.down = c.down.sanitized();
@@ -1383,6 +1477,118 @@ mod tests {
         assert!(c.building.units_per_floor.iter().all(|&u| u == 18));
         assert_eq!(c.building.residents_at(2), 72);
         assert!(c.validate().is_ok());
+    }
+
+    /// 夹取的每一条在 validate 里都有对应的错误。校验放过的配置再夹一次
+    /// 必须原样返回，否则用户描述的是 A 楼，跑的是 B 楼。
+    #[test]
+    fn sanitize_is_identity_after_validation() {
+        let describe = |c: &Config| {
+            format!(
+                "top={} fh={} ppu={} units={:?} gfr={} cars={:?}",
+                c.building.top_level,
+                c.building.floor_height,
+                c.building.persons_per_unit,
+                c.building.units_per_floor,
+                c.building.ground_floor_residential,
+                c.cars
+                    .iter()
+                    .map(|k| {
+                        format!(
+                            "{} {} {} | {} {} {} {} {} | {} {} {} {} {}",
+                            k.capacity_rated,
+                            k.rated_load_kg,
+                            k.initial_level,
+                            k.up.v_max,
+                            k.up.a_acc,
+                            k.up.a_dec,
+                            k.up.j_acc,
+                            k.up.j_dec,
+                            k.down.v_max,
+                            k.down.a_acc,
+                            k.down.a_dec,
+                            k.down.j_acc,
+                            k.down.j_dec,
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            )
+        };
+
+        for name in preset_names() {
+            let c = preset(name).unwrap();
+            assert!(c.validate().is_ok(), "预设 {name} 应当合法");
+            assert_eq!(
+                describe(&c),
+                describe(&c.clone().sanitized()),
+                "预设 {name} 被夹取改动了"
+            );
+        }
+
+        // 每一处夹取的边界上刚好合法的配置
+        let edge = |capacity: usize, load: f32, speed: f32, level: i16| {
+            let mut c = Config::default();
+            c.building.top_level = 81;
+            c.building.units_per_floor = vec![MAX_UNITS_PER_FLOOR; 81];
+            c.building.persons_per_unit = 6.0;
+            c.building.floor_height = 6.0;
+            c.cars = vec![CarSpec {
+                capacity_rated: capacity,
+                rated_load_kg: load,
+                initial_level: level,
+                up: MotionProfile::for_speed(speed),
+                down: MotionProfile::for_speed(speed),
+                ..CarSpec::default()
+            }];
+            c
+        };
+        for c in [
+            edge(1, 100.0, 0.1, 1),
+            edge(40, 5000.0, 20.0, 81),
+            edge(13, 1000.0, 1.75, 1),
+        ] {
+            let v = c.validate();
+            assert!(
+                v.is_ok(),
+                "边界配置应当合法：{:?}",
+                v.errors().map(|i| i.message.clone()).collect::<Vec<_>>()
+            );
+            assert_eq!(
+                describe(&c),
+                describe(&c.clone().sanitized()),
+                "边界配置被夹取改动了"
+            );
+        }
+    }
+
+    /// 户数超过防呆上限要报错，不能放行之后悄悄削到 32。
+    #[test]
+    fn units_above_the_sanity_cap_are_rejected() {
+        let mut c = Config::default();
+        c.building.units_per_floor = vec![MAX_UNITS_PER_FLOOR + 1; 18];
+        let v = c.validate();
+        assert!(!v.is_ok(), "超过上限的户数应当被挡下");
+        assert!(v.errors().any(|i| i.code == "units_per_floor"));
+    }
+
+    /// 轿厢规格越界也要在校验阶段挡，不能靠夹取兜。
+    #[test]
+    fn out_of_range_car_specs_are_rejected() {
+        let mut c = Config::default();
+        c.cars[0].capacity_rated = 0;
+        assert!(!c.validate().is_ok(), "零人的轿厢不合法");
+
+        let mut c = Config::default();
+        c.cars[0].initial_level = 0;
+        assert!(!c.validate().is_ok(), "层号 0 不存在");
+
+        let mut c = Config::default();
+        c.cars[0].initial_level = 99;
+        assert!(!c.validate().is_ok(), "初始层超出楼的范围");
+
+        let mut c = Config::default();
+        c.cars[0].up.v_max = 0.0;
+        assert!(!c.validate().is_ok(), "零速度的曲线不合法");
     }
 
     /// 层间交通的口径与住宅不同：总人数就是常驻人数乘出行率，
