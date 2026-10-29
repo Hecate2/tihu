@@ -50,12 +50,14 @@ pub struct Pax {
     pub t_board: f64,
     /// 当前腿的出梯时刻
     pub t_exit: f64,
-    /// 到站但没上去的次数
-    pub bypass_count: u32,
-    /// 因为挤不上而没上去的次数
+    /// 当前这条腿因为不肯挤而没上去的次数
     pub declined_count: u32,
-    /// 因为没位子而没上去的次数
+    /// 当前这条腿因为没位子而没上去的次数
     pub no_space_count: u32,
+    /// 已经走完的腿累计的次数。出梯时从单腿计数搬过来再清零，人物级的
+    /// 统计读两者之和。换腿要清零单腿计数，累计值不能跟着清
+    pub declined_total: u32,
+    pub no_space_total: u32,
     /// 出发前就决定走楼梯，见红线 4
     pub used_stairs: bool,
     /// 等得不耐烦改走楼梯。与 `used_stairs` 分开统计
@@ -101,6 +103,16 @@ impl Pax {
     /// 这位乘客此刻还在电梯厅等吗。
     pub fn waiting(&self) -> bool {
         self.t_exit <= 0.0 && !self.used_stairs && !self.abandoned && self.boarded_car.is_none()
+    }
+
+    /// 当前这条腿被跳过几次。不肯挤与没位子各算一次。
+    pub fn leg_bypass(&self) -> u32 {
+        self.declined_count + self.no_space_count
+    }
+
+    /// 整个行程被跳过几次，含已经走完的腿。
+    pub fn bypass(&self) -> u32 {
+        self.declined_total + self.no_space_total + self.leg_bypass()
     }
 }
 
@@ -649,9 +661,10 @@ impl World {
                 boarded_car: None,
                 t_board: 0.0,
                 t_exit: 0.0,
-                bypass_count: 0,
                 declined_count: 0,
                 no_space_count: 0,
+                declined_total: 0,
+                no_space_total: 0,
                 used_stairs: use_stairs,
                 abandoned: false,
                 reversal_floor: None,

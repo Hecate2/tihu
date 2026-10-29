@@ -444,7 +444,7 @@ fn abandon_to_stairs(w: &mut World, pid: usize, metrics: &mut Metrics) {
     metrics.wait.add(waited);
     let (bypass, declined, no_space) = {
         let p = &w.pax[pid];
-        (p.bypass_count, p.declined_count, p.no_space_count)
+        (p.leg_bypass(), p.declined_count, p.no_space_count)
     };
     let fs = &mut metrics.by_floor[qi];
     fs.count += 1;
@@ -1322,9 +1322,15 @@ fn board_and_alight<B: Boarding>(
         fs.d2d_sum += d2d;
         fs.d2d_max = fs.d2d_max.max(d2d);
         fs.d2d_samples.add(d2d);
-        fs.bypass_total += pax.bypass_count;
+        fs.bypass_total += pax.leg_bypass();
         fs.declined += pax.declined_count;
         fs.no_space += pax.no_space_count;
+        // 这一腿的计数已经进逐层了，搬进累计值再清零。人物级的统计读两者
+        // 之和，换腿时清零单腿计数不会把前一腿的丢掉
+        pax.declined_total += pax.declined_count;
+        pax.no_space_total += pax.no_space_count;
+        pax.declined_count = 0;
+        pax.no_space_count = 0;
     }
 
     // 还有下一条腿的人，过一阵子从这一层出发回去。这就是条件性需求
@@ -1340,9 +1346,6 @@ fn board_and_alight<B: Boarding>(
             w.pax[pid].t_arrive = at;
             w.pax[pid].t_board = 0.0;
             w.pax[pid].t_exit = 0.0;
-            w.pax[pid].bypass_count = 0;
-            w.pax[pid].declined_count = 0;
-            w.pax[pid].no_space_count = 0;
             heap.push(Ev {
                 at,
                 seq: *seq,
@@ -1472,12 +1475,10 @@ fn try_board_one<B: Boarding>(
     match boarding.admit_one(&sample, tol) {
         Verdict::NoSpace => {
             w.pax[pid].no_space_count += 1;
-            w.pax[pid].bypass_count += 1;
             false
         }
         Verdict::Declined => {
             w.pax[pid].declined_count += 1;
-            w.pax[pid].bypass_count += 1;
             false
         }
         Verdict::Admit => {
@@ -1488,8 +1489,7 @@ fn try_board_one<B: Boarding>(
             let prob = default_accept_prob(&w.cfg.boarding, &sample, tol);
             if prob < 1.0 && !rng.chance(Stream::Squeeze, prob) {
                 w.pax[pid].declined_count += 1;
-                w.pax[pid].bypass_count += 1;
-                return false;
+                    return false;
             }
             // 物理极限。两个上限取先到的那个。
             //
@@ -1502,13 +1502,11 @@ fn try_board_one<B: Boarding>(
                 .load_crush_kg(w.cfg.cars[id].rated_load_kg as f64);
             if w.cars[id].load_kg + w.pax[pid].weight > load_crush + 1e-9 {
                 w.pax[pid].no_space_count += 1;
-                w.pax[pid].bypass_count += 1;
-                return false;
+                    return false;
             }
             if w.cars[id].occupants.len() >= crush {
                 w.pax[pid].no_space_count += 1;
-                w.pax[pid].bypass_count += 1;
-                return false;
+                    return false;
             }
             w.cars[id].occupants.push(pid);
             w.cars[id].load_kg += w.pax[pid].weight;
@@ -1679,10 +1677,12 @@ fn collect(w: &World, mut stalls: usize, mut stall_seconds: f64, mut m: Metrics)
             continue;
         }
         m.pax_served += 1;
-        if p.bypass_count > 0 {
+        // 还没走完最后一腿的人，这一段还挂在单腿计数上没搬
+        let bypass = p.bypass();
+        if bypass > 0 {
             m.pax_with_bypass += 1;
         }
-        if p.bypass_count >= 3 {
+        if bypass >= 3 {
             m.pax_bypass3 += 1;
         }
         if p.requeued_after_stall {
@@ -2337,7 +2337,6 @@ mod tests {
             .expect("该有人在等车");
         let from = w.pax[pid].from;
         let qi = w.qidx(from);
-        w.pax[pid].bypass_count = 2;
         w.pax[pid].declined_count = 1;
         w.pax[pid].no_space_count = 1;
         w.pax[pid].t_arrive = w.now;
@@ -2353,6 +2352,51 @@ mod tests {
         assert_eq!(fs.bypass_total, 2, "两次被跳过要进逐层总数");
         assert_eq!(fs.declined, 1, "拒挤那次要留下");
         assert_eq!(fs.no_space, 1, "没位子那次要留下");
+    }
+
+    /// 人物级的跳过次数要跨腿累计。`collect` 读「累计值 + 当前腿」，不能
+    /// 只看当前腿：换腿会清零单腿计数，只看它会把第一腿的次数抹掉。
+    #[test]
+    fn person_level_bypass_reads_both_counters() {
+        let mut w = World::new(small());
+        assert!(w.pax.len() >= 2, "前提：至少两位乘客");
+        for pid in 0..2 {
+            w.pax[pid].hops_done = 1;
+            w.pax[pid].t_exit = 1.0;
+            w.pax[pid].used_stairs = false;
+            w.pax[pid].abandoned = false;
+        }
+        // 一号：第一腿被跳过两次，第二腿又被跳过一次
+        w.pax[0].declined_total = 2;
+        w.pax[0].declined_count = 1;
+        // 二号：一次都没被跳过
+        w.pax[1].declined_total = 0;
+        w.pax[1].declined_count = 0;
+        let m = collect(&w, 0, 0.0, Metrics::with_floors(w.n_levels));
+        assert_eq!(m.pax_served, 2);
+        assert_eq!(m.pax_with_bypass, 1, "两次累计加当前一次，是同一个人的三次");
+        assert_eq!(m.pax_bypass3, 1, "三次就该进「被跳过三次」那一档");
+    }
+
+    /// 一条腿走完就结算：单腿计数搬进累计值并清零，不留残值。
+    #[test]
+    fn bypass_counts_move_to_the_total_when_a_leg_ends() {
+        let mut c = small();
+        c.traffic.return_ratio = 0.5;
+        c.traffic.departure_ratio = 1.0;
+        c.stairs.enabled = false;
+        let r = default_run(c);
+        let two_legged: Vec<_> = r
+            .world
+            .pax
+            .iter()
+            .filter(|p| p.n_hops == 2 && p.hops_done == 2)
+            .collect();
+        assert!(!two_legged.is_empty(), "前提：得有人把两腿都走完");
+        assert!(
+            two_legged.iter().all(|p| p.leg_bypass() == 0),
+            "走完的腿已经结算过，单腿计数该清零"
+        );
     }
 
     /// 过期计时器不赶人。换腿和僵局重排都会推迟 abandon_at，
@@ -2430,15 +2474,15 @@ mod tests {
         c.stairs.abandon_after_s = 0.0;
         let r = default_run(c);
         assert!(r.metrics.pax_with_bypass > 0, "这么挤的楼该有人被跳过");
-        let any_reason = r.world.pax.iter().any(|p| p.declined_count > 0)
-            || r.world.pax.iter().any(|p| p.no_space_count > 0);
+        let any_reason = r.world.pax.iter().any(|p| p.declined_total + p.declined_count > 0)
+            || r.world.pax.iter().any(|p| p.no_space_total + p.no_space_count > 0);
         assert!(any_reason, "被跳过的人该记下原因");
         // 有人被跳过，却最终被送走了，说明车是带着空位开走的
         let served_with_bypass = r
             .world
             .pax
             .iter()
-            .filter(|p| p.bypass_count > 0 && p.t_exit > 0.0)
+            .filter(|p| p.bypass() > 0 && p.t_exit > 0.0)
             .count();
         assert!(served_with_bypass > 0, "被跳过的人最终也该被送走");
     }
@@ -2458,8 +2502,18 @@ mod tests {
             c.boarding.soft_start_ratio = soft;
             c.boarding.gamma = gamma;
             let r = default_run(c);
-            let declined = r.world.pax.iter().map(|p| p.declined_count).sum();
-            let no_space = r.world.pax.iter().map(|p| p.no_space_count).sum();
+            let declined = r
+                .world
+                .pax
+                .iter()
+                .map(|p| p.declined_total + p.declined_count)
+                .sum();
+            let no_space = r
+                .world
+                .pax
+                .iter()
+                .map(|p| p.no_space_total + p.no_space_count)
+                .sum();
             (declined, no_space)
         }
         // 门槛压到 0：人人掷骰子，declined 应当最多
