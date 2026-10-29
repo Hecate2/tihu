@@ -34,13 +34,9 @@ pub struct CarBrief {
 }
 
 impl CarBrief {
-    /// 载客率，0 到 1 以上都有可能。
+    /// 载客率，0 到 1 以上都有可能。额定人数由校验与 sanitized 保证至少 1。
     pub fn load_ratio(&self) -> f64 {
-        if self.capacity == 0 {
-            0.0
-        } else {
-            self.load as f64 / self.capacity as f64
-        }
+        self.load as f64 / self.capacity as f64
     }
 }
 
@@ -147,12 +143,9 @@ impl RunView<'_> {
         self.car_calls.iter().copied().min()
     }
 
+    /// 载客率。额定人数由校验与 sanitized 保证至少 1。
     pub fn load_ratio(&self) -> f64 {
-        if self.capacity_rated == 0 {
-            0.0
-        } else {
-            self.load as f64 / self.capacity_rated as f64
-        }
+        self.load as f64 / self.capacity_rated as f64
     }
 
     /// 名下有没有任何未完成的任务。

@@ -178,9 +178,7 @@ impl Assigner for RoundRobin {
     }
 
     fn assign(&self, v: &SystemView<'_>, _call: HallCall) -> Option<CarId> {
-        if v.n_cars == 0 {
-            return None;
-        }
+        // 楼里至少一台轿厢，World::new 卡住了这一条
         let i = self.cursor.get() % v.n_cars;
         self.cursor.set(self.cursor.get().wrapping_add(1));
         Some(i)
