@@ -263,9 +263,9 @@ impl Call {
     pub fn slot_index(level: i16, dir: Dir, basement: i16) -> usize {
         let d = match dir {
             Dir::Up => 1,
-            _ => 0,
+            Dir::Down | Dir::None => 0,
         };
-        (level + basement).max(0) as usize * 2 + d
+        (level + basement) as usize * 2 + d
     }
 }
 

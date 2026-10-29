@@ -260,9 +260,6 @@ fn after_event<A: Assigner>(
     assign_unowned(w, assigner, sv, heap, seq);
     prune_calls(w);
     w.fill_views(sv);
-    if w.cars.is_empty() {
-        return;
-    }
     // 归属表借内核的复用缓冲，事件之间不再申请内存
     sv.owned.clear();
     sv.owned.extend(w.calls.calls.iter().map(|c| c.owner));
@@ -588,7 +585,7 @@ fn assign_unowned<A: Assigner>(
 /// 另看层上还有没有人在等，否则出生没主的独立呼叫永远没人捡
 fn should_dispatch(w: &World, i: usize) -> bool {
     let c = &w.calls.calls[i];
-    if c.owner.is_some() || w.calls.slots.is_empty() {
+    if c.owner.is_some() {
         return false;
     }
     if c.exclusive {
@@ -742,7 +739,7 @@ fn register_calls(w: &mut World, level: i16, newly: &[usize]) -> Vec<u32> {
             }
             // 同时呼叫多台。只有独立面板才做得到
             Strategy::MultiCall => {
-                if per_car && !w.cars.is_empty() {
+                if per_car {
                     let n = count_waiting(w, level, wanted);
                     let k = w.cars.len().min(2);
                     for t in 0..k {
@@ -1303,12 +1300,13 @@ fn board_and_alight<B: Boarding>(
     // 记一条腿的指标。一条腿一算，所以带返程的乘客两条腿各算一次
     for &pid in &exited {
         let from = w.pax[pid].from;
+        // 先把下标算好再借乘客。qidx 借整个 World，与下面那笔可变借用作对
+        let lv_idx = w.qidx(from);
         let pax = &mut w.pax[pid];
         pax.t_exit = now;
         pax.boarded_car = None;
         pax.hops_done += 1;
         let (wait, ride, d2d) = (pax.wait(), pax.ride(), pax.door_to_door());
-        let lv_idx = (from + w.basement).clamp(0, w.n_levels as i16 - 1) as usize;
         metrics.wait.add(wait);
         metrics.ride.add(ride);
         metrics.door_to_door.add(d2d);
@@ -1461,14 +1459,15 @@ fn try_board_one<B: Boarding>(
     //
     // 按额定算的话轿厢永远坐不满超过铭牌数，拒挤曲线只在额定线以下起作用，
     // 重量也就永远压不过报警线，红线 6 的超载死锁根本触发不了
-    let free = crush.saturating_sub(w.cars[id].occupants.len());
-    let load_ratio = w.cars[id].occupants.len() as f64 / capacity_rated.max(1) as f64;
+    // 车里的不会比 crush 多：每次 push 之前都先比这道线，见下面的 Admit 分支
+    let free = crush - w.cars[id].occupants.len();
+    let load_ratio = w.cars[id].occupants.len() as f64 / capacity_rated as f64;
     let waited = (now - w.pax[pid].t_arrive).max(0.0);
     let sample = AdmitSample {
         load_ratio,
         free_slots: free,
         waited_s: waited,
-        weight_ratio: w.cars[id].load_kg / (w.cfg.cars[id].rated_load_kg as f64).max(1.0),
+        weight_ratio: w.cars[id].load_kg / w.cfg.cars[id].rated_load_kg as f64,
     };
     let tol = w.pax[pid].tol;
 

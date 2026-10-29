@@ -1287,7 +1287,7 @@ impl Config {
         let b = &self.building;
         let dep = self.traffic.departure_ratio as f64;
         if self.traffic.pattern == Pattern::InterFloor {
-            return (b.total_residents() as f64 * dep).round().max(0.0) as usize;
+            return (b.total_residents() as f64 * dep).round() as usize;
         }
         let rev = self.traffic.reverse_ratio as f64;
         let per_party = b.persons_per_unit.round().clamp(1.0, 4.0) as f64;
@@ -1300,7 +1300,7 @@ impl Config {
             1.0
         };
         let lobby_units = b.units_at(LOBBY) as f64;
-        let riders = (units - lobby_units * p_lobby_entrance).max(0.0);
+        let riders = units - lobby_units * p_lobby_entrance;
         // 反向细流是在「这一户已经有人出门」之后再掷的，不是每户独立掷一次，
         // 所以是 dep*(1+rev)，不是 dep+rev。写成后者在低出行率下会高估
         (riders * per_party * dep * (1.0 + rev)) as usize
