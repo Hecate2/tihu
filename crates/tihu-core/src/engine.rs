@@ -392,7 +392,7 @@ impl World {
         // 对不上：sanitized() 会把小于 2 的 top_level 抬到 2，而 n_levels
         // 是按旧值算的，生成出来的乘客落在数组外面
         let cfg = cfg.sanitized();
-        let basement = cfg.building.basement_levels.max(0);
+        let basement = cfg.building.basement_levels;
         let top = cfg.building.top_level;
         let n_levels = (top + basement + 1) as usize;
 
@@ -821,7 +821,7 @@ impl World {
 }
 
 fn n_slots_for(cfg: &Config) -> usize {
-    (cfg.building.top_level + cfg.building.basement_levels.max(0) + 1) as usize * 2
+    (cfg.building.top_level + cfg.building.basement_levels + 1) as usize * 2
 }
 
 /// 主入口层还是地下车库。出门与回家两股客流都用它。
@@ -829,7 +829,7 @@ fn n_slots_for(cfg: &Config) -> usize {
 /// 绝大多数人去主入口层，少数直接去地下车库。车库占比 7% 是
 /// `docs/MODEL.md` 第 4.3 节的取值，待标定。
 fn pick_entrance_level(rng: &mut crate::rng::Streams, b: &crate::config::Building) -> i16 {
-    let basements = b.basement_levels.max(0);
+    let basements = b.basement_levels;
     if basements > 0 && rng.chance(Stream::Demand, crate::config::BASEMENT_ENTRANCE_PROB) {
         -1 - rng.below(Stream::Demand, basements.min(2) as u32) as i16
     } else {

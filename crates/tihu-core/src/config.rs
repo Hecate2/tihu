@@ -947,6 +947,13 @@ impl Config {
                 format!("户均人数应在 1 到 6 之间，当前 {:.1}", b.persons_per_unit),
             ));
         }
+        // 地下层数是个计数。负数没法落地，夹到 0 会让报告说的楼与配置不是一栋
+        if b.basement_levels < 0 {
+            v.issues.push(Issue::error(
+                "basement_levels",
+                format!("地下层数不能是负数，当前 {}", b.basement_levels),
+            ));
+        }
         if self.cars.is_empty() {
             v.issues
                 .push(Issue::error("no_cars", "至少要有一台轿厢".into()));
@@ -1242,7 +1249,6 @@ impl Config {
         v
     }
 
-    /// 把配置里明显不合理的值夹到合理范围。校验通过之后调用。
     /// 把配置里明显不合理的值夹到合理范围。校验通过之后调用，此时应当
     /// 什么都不改。
     ///
@@ -1252,6 +1258,7 @@ impl Config {
     /// 网页与 JSON 接口那条路先过校验，到不了这些边界。
     pub fn sanitized(mut self) -> Self {
         self.building.top_level = self.building.top_level.max(2);
+        self.building.basement_levels = self.building.basement_levels.max(0);
         self.building.floor_height = self.building.floor_height.clamp(2.4, 6.0);
         self.building.persons_per_unit = self.building.persons_per_unit.clamp(1.0, 6.0);
         if self.building.units_per_floor.len() != self.building.top_level as usize {
@@ -1269,8 +1276,8 @@ impl Config {
             c.capacity_rated = c.capacity_rated.clamp(1, 40);
             c.rated_load_kg = c.rated_load_kg.clamp(100.0, 5000.0);
             c.initial_level = c.initial_level.clamp(
-                -self.building.basement_levels.max(0),
-                self.building.top_level.max(1),
+                -self.building.basement_levels,
+                self.building.top_level,
             );
             // 层号 0 不存在（MODEL 2.1）。无地下层时夹取区间的下界就是 0，
             // 会把这个不存在的层放进来，落回主入口层
@@ -1569,6 +1576,16 @@ mod tests {
                 "边界配置被夹取改动了"
             );
         }
+    }
+
+    /// 地下层数是个计数，负数夹到 0 等于换了一栋楼。
+    #[test]
+    fn negative_basement_levels_are_rejected() {
+        let mut c = Config::default();
+        c.building.basement_levels = -1;
+        let v = c.validate();
+        assert!(!v.is_ok(), "负的地下层数应当被挡下");
+        assert!(v.errors().any(|i| i.code == "basement_levels"));
     }
 
     /// 体重分量的份额是抽样比例，表空了就抽不出这栋楼的人。
