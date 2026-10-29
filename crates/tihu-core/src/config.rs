@@ -1186,9 +1186,15 @@ impl Config {
     /// 主入口层那几户是个例外。他们的出发层和入口层抽到一起时是零长度行程，
     /// 不上电梯，`emit_party` 会把这种团丢掉。入口抽在主入口层，还是抽到车库，
     /// 由 `BASEMENT_ENTRANCE_PROB` 定，所以主入口层的户只有一小截剩得下。
+    ///
+    /// 层间交通是另一套口径：客流按「常驻人数 × 出行率」摊到客流表上，
+    /// 团人数只决定分组，不再乘一次。见 `engine::build_inter_floor`。
     pub fn expected_trips(&self) -> usize {
         let b = &self.building;
         let dep = self.traffic.departure_ratio as f64;
+        if self.traffic.pattern == Pattern::InterFloor {
+            return (b.total_residents() as f64 * dep).round().max(0.0) as usize;
+        }
         let rev = self.traffic.reverse_ratio as f64;
         let per_party = b.persons_per_unit.round().clamp(1.0, 4.0) as f64;
         let units: f64 = (1..=b.highest_level()).map(|l| b.units_at(l) as f64).sum();
@@ -1377,6 +1383,16 @@ mod tests {
         assert!(c.building.units_per_floor.iter().all(|&u| u == 18));
         assert_eq!(c.building.residents_at(2), 72);
         assert!(c.validate().is_ok());
+    }
+
+    /// 层间交通的口径与住宅不同：总人数就是常驻人数乘出行率，
+    /// 团人数只决定分组，不进这个公式。
+    #[test]
+    fn expected_trips_for_inter_floor_counts_travelers() {
+        let c = preset("hospital").unwrap();
+        assert_eq!(c.traffic.pattern, Pattern::InterFloor);
+        let travelers = (c.building.total_residents() as f64 * 0.35).round() as usize;
+        assert_eq!(c.expected_trips(), travelers);
     }
 
     #[test]

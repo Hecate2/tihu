@@ -536,9 +536,12 @@ impl World {
 
     /// 层间交通的生成器。医院、写字楼这类场景用它。
     ///
-    /// 客流表里每一股给出起终点与占比。总的团数按全楼住户乘出行率估出，
-    /// 再按占比摊到各股上。所以 `units_per_floor` 在这个模式下读作「每层几个
-    /// 科室或病房」，`persons_per_unit` 读作「每间常驻几人」。
+    /// 客流表里每一股给出起终点与占比。出行人数是「全楼常驻人数 × 出行率」，
+    /// 再按占比摊到各股上，每股再按团人数分成若干个同行团。所以
+    /// `units_per_floor` 在这个模式下读作「每层几个科室或病房」，
+    /// `persons_per_unit` 读作「每间常驻几人」。
+    ///
+    /// 团人数只决定这些人怎么分组，不能再乘一次：它已经含在常驻人数里了。
     fn build_inter_floor(
         &mut self,
         rng: &mut crate::rng::Streams,
@@ -554,14 +557,15 @@ impl World {
         if total <= 0.0 {
             return;
         }
-        let parties = (self.cfg.building.total_residents() as f64 * dep)
+        let size = self.cfg.building.persons_per_unit.round().clamp(1.0, 4.0) as usize;
+        let travelers = (self.cfg.building.total_residents() as f64 * dep)
             .round()
-            .max(1.0) as usize;
+            .max(1.0);
+        let parties = (travelers / size as f64).round().max(1.0) as usize;
         for f in &flows {
             let n = ((parties as f64) * f.share.max(0.0) / total).round() as usize;
             for _ in 0..n {
                 let t0 = self.shape_intensity(rng.f64(Stream::Arrival)) * window;
-                let size = self.cfg.building.persons_per_unit.round().clamp(1.0, 4.0) as usize;
                 self.emit_party(f.from, f.to, size, t0, false, false, horizon, rng);
             }
         }
@@ -1189,6 +1193,25 @@ mod tests {
         assert_eq!(w.cars.len(), cfg.cars.len());
         assert_eq!(w.hall.len(), w.n_levels);
         assert_eq!(w.calls.calls.capacity(), 0, "预分配后不该立刻扩容");
+    }
+
+    /// 层间交通的总人数是「常驻人数 × 出行率」。团人数只决定这些人怎么
+    /// 分组，不能再乘一次，否则户均三人时客流会变成设计值的三倍。
+    #[test]
+    fn inter_floor_passengers_match_expected_trips() {
+        let c = crate::config::preset("hospital").unwrap();
+        let travelers = c.building.total_residents() as f64 * c.traffic.departure_ratio as f64;
+        let exp = c.expected_trips() as f64;
+        assert!(
+            (exp - travelers).abs() < 1.0,
+            "估算应当就是常驻人数乘出行率 {travelers:.1}，实际 {exp}"
+        );
+        let got = World::new(c).pax.len() as f64;
+        // 团数要取整，再按客流占比摊到各股上，允许一成的分配误差
+        assert!(
+            (got - exp).abs() <= exp * 0.1,
+            "实际生成 {got} 人，与估算的 {exp} 相差太远"
+        );
     }
 
     /// 空梯配置在造世界时就明确报错，而不是在抽样深处索引越界。
