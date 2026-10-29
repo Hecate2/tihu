@@ -18,24 +18,36 @@ use tihu_core::config::{Config, Severity, LOBBY};
 use tihu_core::metrics::{Metrics, Summary};
 use tihu_core::sim::{self, Run};
 
-/// 可选的走向算法。序号与网页下拉框一一对应。
-const ROUTERS: [&str; 2] = ["down_peak_sweep", "collective_scan"];
+/// 可选的一种走向算法。序号与网页下拉框一一对应。
+struct RouterRow {
+    name: &'static str,
+    /// 下拉框里显示的那一行
+    label: &'static str,
+    /// 下拉框下面单独开一块显示的一句话
+    desc: &'static str,
+}
 
-/// 走向算法的中文说明。网页直接显示，不需要再维护第二份表。
-const ROUTER_LABELS: [&str; 2] = [
-    "定向扫楼：先上到顶再一路下行",
-    "集选：沿一个方向走，沿途有人按就停",
-];
-
-/// 走向算法的一句话解释。网页在下拉框下面单独开一块显示。
+/// 可选的走向算法表。加一个算法加一项，删一个删一行。
 ///
-/// 这里说的是**走向**，也就是车开出去之后往哪走。新按下的一条外呼分给哪台
-/// 轿厢由内核的派梯规则统一负责，两种算法在这一层完全一样。满载直驶也是
-/// 内核行为，不是算法选项，见 `docs/DISPATCH_API.md`。名字不能混用，
-/// 见 `AGENTS.md` 第 6 节的名词表。
-const ROUTER_DESCS: [&str; 2] = [
-    "先开到当前最高的那个呼叫层，再一路往下扫到最低。早高峰大家同时下楼时最省事，晚高峰要上楼的客流会被它绕远。",
-    "轿厢认准一个方向走，路上有同向的呼叫就停，走到头再掉头。任何时段都能用，是住宅楼的通用选择。",
+/// 名字、标签、解释写在同一行。分成三张平行数组的话，少改一张就会把标签
+/// 配到另一个算法上，编译期看不出来。用切片而不是定长数组，也就没有第二处
+/// 要跟着改的个数。
+///
+/// 这里的「走向」指车开出去之后往哪走。新按下的一条外呼分给哪台轿厢由内核
+/// 的派梯规则统一负责，两种算法在这一层完全一样。满载直驶也是内核行为，
+/// 不是算法选项，见 `docs/DISPATCH_API.md`。名字不能混用，见 `AGENTS.md`
+/// 第 6 节的名词表。
+const ROUTERS: &[RouterRow] = &[
+    RouterRow {
+        name: "down_peak_sweep",
+        label: "定向扫楼：先上到顶再一路下行",
+        desc: "先开到当前最高的那个呼叫层，再一路往下扫到最低。早高峰大家同时下楼时最省事，晚高峰要上楼的客流会被它绕远。",
+    },
+    RouterRow {
+        name: "collective_scan",
+        label: "集选：沿一个方向走，沿途有人按就停",
+        desc: "轿厢认准一个方向走，路上有同向的呼叫就停，走到头再掉头。任何时段都能用，是住宅楼的通用选择。",
+    },
 ];
 
 /// 取三位小数。报告只用于显示，多余的位数只是把 JSON 撑大。
@@ -474,9 +486,7 @@ pub fn preset_config_json(name: &str) -> String {
 pub fn routers_json() -> String {
     let list: Vec<serde_json::Value> = ROUTERS
         .iter()
-        .zip(ROUTER_LABELS.iter())
-        .zip(ROUTER_DESCS.iter())
-        .map(|((n, l), d)| serde_json::json!({ "name": n, "label": l, "desc": d }))
+        .map(|r| serde_json::json!({ "name": r.name, "label": r.label, "desc": r.desc }))
         .collect();
     serde_json::to_string(&list).unwrap_or_else(|_| "[]".to_string())
 }
@@ -532,7 +542,8 @@ pub fn report_json(cfg_json: &str, router: &str) -> String {
         return serde_json::to_string(&Response { ok: false, issues, sim: None })
             .unwrap_or_else(|_| r#"{"ok":false,"issues":[]}"#.to_string());
     }
-    let router = if ROUTERS.contains(&router) { router } else { ROUTERS[0] };
+    // 认不出名字就用表里第一个，不让一个拼错的名字把整次调用变成错误
+    let router = ROUTERS.iter().find(|r| r.name == router).unwrap_or(&ROUTERS[0]).name;
     let cfg = cfg.sanitized();
     // 结束值大于根种子才走批量，否则照旧单跑，报告里一个批量字段都不出现
     let sim = if cfg.sim.seed_to.is_some_and(|t| t > cfg.sim.seed) {
@@ -601,7 +612,7 @@ fn to_buf(s: String) -> *mut u8 {
 /// `cfg_ptr` 必须指向 `cfg_len` 个有效字节，且那些字节拼起来是合法 UTF-8。
 #[no_mangle]
 pub unsafe extern "C" fn tihu_run(cfg_ptr: *const u8, cfg_len: usize, router_id: u32) -> *mut u8 {
-    let router = ROUTERS.get(router_id as usize).copied().unwrap_or(ROUTERS[0]);
+    let router = ROUTERS.get(router_id as usize).unwrap_or(&ROUTERS[0]).name;
     let json = if cfg_ptr.is_null() || cfg_len == 0 {
         String::new()
     } else {
@@ -720,6 +731,23 @@ mod tests {
         let v: serde_json::Value = serde_json::from_str(&r).unwrap();
         assert_eq!(v["ok"], true);
         assert_eq!(v["sim"]["router"], "down_peak_sweep");
+    }
+
+    /// 表里不许重名。重了之后按下标取的与按名字找的会不是同一项，
+    /// 而两条路都从这张表走，网页上点第几项与链接里写名字就会对不上。
+    #[test]
+    fn router_table_has_no_duplicate_name() {
+        let mut names: Vec<&str> = ROUTERS.iter().map(|r| r.name).collect();
+        let n = names.len();
+        names.sort_unstable();
+        names.dedup();
+        assert_eq!(names.len(), n, "算法名撞车了");
+        for r in ROUTERS {
+            assert!(!r.label.is_empty() && !r.desc.is_empty(), "{} 缺标签或解释", r.name);
+        }
+        // 下拉框读到几项，表里就该有几项
+        let advertised: serde_json::Value = serde_json::from_str(&routers_json()).unwrap();
+        assert_eq!(advertised.as_array().unwrap().len(), n);
     }
 
     /// 种子范围大于根种子时走批量，报告里带 runs 与逐层的较好较差。
