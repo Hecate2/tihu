@@ -733,6 +733,21 @@ mod tests {
         assert_eq!(v["sim"]["router"], "down_peak_sweep");
     }
 
+    /// 表里的名字必须是类型自己报的那个名字。
+    ///
+    /// 报告里的 `router` 字段取的是表里的字符串，与类型无关。两边一旦对不上，
+    /// 报告就会指着一个其实没跑过的算法。顺序也一并钉住：`tihu_run` 的第四个
+    /// 参数是下标，重排这张表会改变同一个下标选中的算法。
+    #[test]
+    fn table_names_match_the_types() {
+        use tihu_core::policy::Router;
+
+        assert_eq!(ROUTERS[0].name, DownPeakSweep.name());
+        assert_eq!(ROUTERS[1].name, CollectiveScan.name());
+        assert_eq!(ROUTERS[0].name, "down_peak_sweep");
+        assert_eq!(ROUTERS[1].name, "collective_scan");
+    }
+
     /// 表里不许重名。重了之后按下标取的与按名字找的会不是同一项，
     /// 而两条路都从这张表走，网页上点第几项与链接里写名字就会对不上。
     #[test]
