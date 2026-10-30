@@ -146,7 +146,9 @@ function stopsFor(i, n, top, basement) {
     // 高低区。真实楼盘里每一台都停主入口层，否则高区的人出门之后回不了家。
     // 高区梯再往下跑到主入口，正是它比低区梯慢一截的原因。
     const span = top; // 从 1 层到 top 层，一共 top 个格位
-    const lo = Math.max(2, 1 + Math.round((i * (span - 1)) / n) + 1);
+    // 下界收到 top。梯数多于住宅层数时，后面几台算出的下界会越过顶层，
+    // 生成一排根本不存在的楼层，内核直接报错
+    const lo = Math.min(top, Math.max(2, 1 + Math.round((i * (span - 1)) / n) + 1));
     const hi = i === n - 1 ? top : 1 + Math.round(((i + 1) * (span - 1)) / n);
     return { list: levelsFor(basement, lo, Math.max(lo, hi)) };
   }
@@ -808,6 +810,10 @@ async function main() {
   const hash = location.hash;
   if (hash.startsWith("#s=")) {
     if (fromHash(hash.slice(3))) {
+      // 分享链接连预设名一起存了。base 要按它重建，否则预设里那些不在
+      // 控件上的字段，比如每股客流和策略细分，会悄悄落回默认配置
+      const idx = presets.findIndex((p) => p.name === ui.preset.value);
+      if (idx >= 0) base = kernel.config(3 + idx);
       run();
       return;
     }
