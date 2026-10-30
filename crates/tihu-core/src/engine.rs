@@ -105,6 +105,29 @@ impl Pax {
         self.t_exit <= 0.0 && !self.used_stairs && !self.abandoned && self.boarded_car.is_none()
     }
 
+    /// 这位乘客在 `level` 层会不会按 `dir` 这个方向的按钮。
+    ///
+    /// 与真实目的方向不同。只按上行的下行乘客会按上行，双按的人两边都按。
+    /// 判定「这一层这个方向还有没有人等」必须用这个，不能再用 `to > level`。
+    pub fn presses(&self, level: i16, dir: Dir) -> bool {
+        match self.strategy {
+            Strategy::Honest | Strategy::MultiCall => match dir {
+                Dir::Up => self.to > level,
+                Dir::Down => self.to < level,
+                Dir::None => true,
+            },
+            Strategy::PressBoth => match dir {
+                Dir::Up | Dir::Down => self.to != level,
+                Dir::None => true,
+            },
+            Strategy::PressUpOnly => match dir {
+                Dir::Up => self.to != level,
+                Dir::Down => false,
+                Dir::None => true,
+            },
+        }
+    }
+
     /// 当前这条腿被跳过几次。不肯挤与没位子各算一次。
     pub fn leg_bypass(&self) -> u32 {
         self.declined_count + self.no_space_count
@@ -1234,7 +1257,9 @@ mod tests {
         assert_eq!(w.n_levels, 3);
         assert!(w.calls.slots.len() >= w.n_levels * 2, "外呼槽位要覆盖全楼");
         assert!(
-            w.pax.iter().all(|p| w.in_bounds(p.from) && w.in_bounds(p.to)),
+            w.pax
+                .iter()
+                .all(|p| w.in_bounds(p.from) && w.in_bounds(p.to)),
             "乘客的起终点都要在楼里"
         );
     }

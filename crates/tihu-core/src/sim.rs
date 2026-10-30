@@ -14,9 +14,7 @@ use crate::config::{Boarding as BoardCfg, CallSurface, Config, Strategy};
 use crate::engine::{Call, CarPhase, Scratch, World};
 use crate::metrics::Metrics;
 use crate::motion::{decel_distance, state_at, time_at_distance, Dir};
-use crate::policy::{
-    AdmitSample, Assigner, Boarding, CarId, Leg, Router, SystemView, Verdict,
-};
+use crate::policy::{AdmitSample, Assigner, Boarding, CarId, Leg, Router, SystemView, Verdict};
 use crate::rng::{Stream, Streams};
 
 /// 制动反应时间，秒。司机（控制器）从接到指令到开始减速的滞后。
@@ -322,17 +320,9 @@ fn waiting_for(w: &World, level: i16, dir: Dir) -> bool {
     if level < -w.basement || level > w.top {
         return false;
     }
-    w.hall[w.qidx(level)].iter().any(|&p| {
-        let pax = &w.pax[p];
-        if !pax.waiting() {
-            return false;
-        }
-        match dir {
-            Dir::Up => pax.to > level,
-            Dir::Down => pax.to < level,
-            Dir::None => true,
-        }
-    })
+    w.hall[w.qidx(level)]
+        .iter()
+        .any(|&p| w.pax[p].waiting() && w.pax[p].presses(level, dir))
 }
 
 /// 这一层有没有「归别人、但别人接不了」的人在等。
@@ -351,8 +341,19 @@ fn waiting_rescue(w: &World, id: CarId, here: i16) -> bool {
         if !px.waiting() || !w.car_serves(id, px.to) {
             continue;
         }
-        let pdir = if px.to > here { Dir::Up } else { Dir::Down };
-        if want != Dir::None && want != pdir {
+        // 看乘客按过哪个方向，不看他的真实目的方向。只按上行的人按的是
+        // 上行，拿真实方向去查会查到一条他根本没按的呼叫
+        let pdir = match want {
+            Dir::Up | Dir::Down => want,
+            Dir::None => {
+                if px.presses(here, Dir::Up) {
+                    Dir::Up
+                } else {
+                    Dir::Down
+                }
+            }
+        };
+        if !px.presses(here, pdir) {
             continue;
         }
         let slot = Call::slot_index(here, pdir, w.basement);
@@ -694,15 +695,7 @@ fn count_waiting(w: &World, level: i16, dir: Dir) -> usize {
     }
     w.hall[w.qidx(level)]
         .iter()
-        .filter(|&&p| {
-            let pax = &w.pax[p];
-            pax.waiting()
-                && match dir {
-                    Dir::Up => pax.to > level,
-                    Dir::Down => pax.to < level,
-                    Dir::None => true,
-                }
-        })
+        .filter(|&&p| w.pax[p].waiting() && w.pax[p].presses(level, dir))
         .count()
 }
 
@@ -1432,17 +1425,12 @@ fn try_board_one<B: Boarding>(
     now: f64,
     rng: &mut Streams,
 ) -> bool {
-    let wants = if w.pax[pid].to > lv {
-        Dir::Up
-    } else if w.pax[pid].to < lv {
-        Dir::Down
-    } else {
-        Dir::None
-    };
-    // 轿厢方向要匹配。停着不动时任何方向都收
+    // 轿厢方向要匹配乘客按过的按钮，不能拿真实目的方向去挡。
+    // 只按上行的下行乘客按的是上行，双按的人两个方向都收。
+    // 停着不动时任何方向都收
     let matching = match want {
         Dir::None => true,
-        d => d == wants,
+        d => w.pax[pid].presses(lv, d),
     };
     if !matching {
         return false;
@@ -1872,6 +1860,41 @@ mod tests {
             .filter(|p| p.hops_done == 0 && !p.used_stairs && !p.abandoned)
             .count();
         assert_eq!(stranded, 0, "分区梯还有 {stranded} 人永远等不到车");
+    }
+
+    /// 只按上行的下行乘客必须能上车。
+    ///
+    /// 修好之前他按的上行呼叫召来一台沿上行收人的车，方向门槛拿他的真实
+    /// 目的方向去比，一律拒绝。到站后呼叫又被当成没人等而擦掉，只能枯等
+    /// 到仿真结束。
+    #[test]
+    fn press_up_only_passengers_are_not_stranded() {
+        let mut c = Config::default();
+        c.building.top_level = 2;
+        c.building.units_per_floor = vec![2, 2];
+        c.building.persons_per_unit = 1.0;
+        c.cars = vec![CarSpec::default()];
+        c.traffic.pattern = crate::config::Pattern::MorningDown;
+        c.traffic.window_s = 120.0;
+        c.traffic.departure_ratio = 1.0;
+        c.traffic.reverse_ratio = 0.0;
+        c.traffic.return_ratio = 0.0;
+        c.strategy = StrategyMix {
+            honest: 0.0,
+            press_both: 0.0,
+            press_up_only: 1.0,
+            multi_call: 0.0,
+        };
+        c.stairs.enabled = false;
+        c.sim.horizon_s = 3000.0;
+        let r = quick(c, 1);
+        let stranded = r
+            .world
+            .pax
+            .iter()
+            .filter(|p| p.hops_done == 0 && !p.used_stairs && !p.abandoned)
+            .count();
+        assert_eq!(stranded, 0, "只按上行的场景还有 {stranded} 人永远等不到车");
     }
 
     /// 满载直驶：一台电梯被挤满时，路过同向外呼不再白停，计入 `full_bypasses`。
@@ -2430,32 +2453,44 @@ mod tests {
         assert_eq!(metrics.abandoned, 1);
     }
 
-    /// 红线 2：上下都按时，多出来的那条呼叫最终变成一次幽灵停站。
+    /// 红线 2：按过的方向决定能不能上车。
     ///
-    /// 全员上下都按，下行的人手上都会多亮一条上行按键。上行那条没人真的要用，
-    /// 但灯亮着，轿厢一定会来，到了才发现没人上。
+    /// 修好之前只按上行的人会被上行轿厢挡在门外，双按的人也一样。
+    /// 上行那条呼叫召来的车一个人接不走，白停一次。
     #[test]
-    fn unwanted_calls_become_ghost_stops() {
-        let mut c = small();
-        c.traffic.departure_ratio = 1.0;
-        c.strategy = crate::config::StrategyMix {
-            honest: 0.0,
-            press_both: 1.0,
-            press_up_only: 0.0,
-            multi_call: 0.0,
+    fn pressed_direction_decides_who_boards() {
+        let mut w = World::new(small());
+        let pid = 0;
+        {
+            let p = &mut w.pax[pid];
+            p.from = 5;
+            p.to = 1;
+            p.t_arrive = 100.0;
+            p.t_board = 0.0;
+            p.t_exit = 0.0;
+            p.boarded_car = None;
+            p.used_stairs = false;
+            p.abandoned = false;
+            p.weight = 60.0;
+            p.strategy = Strategy::PressUpOnly;
+        }
+        let boarding = crate::builtin::DefaultBoarding {
+            cfg: w.cfg.boarding.clone(),
         };
-        let r = default_run(c);
-        assert!(
-            r.metrics.ghost_stops > 0,
-            "上下都按之后应当出现幽灵停站，实际 {}",
-            r.metrics.ghost_stops
-        );
-        assert!(
-            r.metrics.ghost_stops < r.metrics.pax_total * 3,
-            "幽灵停站多得不合理：{} 次，乘客 {} 人",
-            r.metrics.ghost_stops,
-            r.metrics.pax_total
-        );
+        let mut rng = Streams::new(w.cfg.sim.seed);
+
+        let up = try_board_one(&mut w, 0, 5, pid, Dir::Up, &boarding, 100.0, &mut rng);
+        assert!(up, "只按上行的人应当能坐上上行轿厢");
+        assert_eq!(w.pax[pid].boarded_car, Some(0));
+
+        // 双按的人上行也收
+        w.cars[0].occupants.clear();
+        w.cars[0].load_kg = 0.0;
+        w.pax[pid].boarded_car = None;
+        w.pax[pid].t_board = 0.0;
+        w.pax[pid].strategy = Strategy::PressBoth;
+        let both = try_board_one(&mut w, 0, 5, pid, Dir::Up, &boarding, 100.0, &mut rng);
+        assert!(both, "双按的人应当能坐上先到的上行轿厢");
     }
 
     /// 红线 3：挤不上是随机的，车会带着空位开走，两类原因要分开记。
@@ -2471,8 +2506,15 @@ mod tests {
         c.stairs.abandon_after_s = 0.0;
         let r = default_run(c);
         assert!(r.metrics.pax_with_bypass > 0, "这么挤的楼该有人被跳过");
-        let any_reason = r.world.pax.iter().any(|p| p.declined_total + p.declined_count > 0)
-            || r.world.pax.iter().any(|p| p.no_space_total + p.no_space_count > 0);
+        let any_reason = r
+            .world
+            .pax
+            .iter()
+            .any(|p| p.declined_total + p.declined_count > 0)
+            || r.world
+                .pax
+                .iter()
+                .any(|p| p.no_space_total + p.no_space_count > 0);
         assert!(any_reason, "被跳过的人该记下原因");
         // 有人被跳过，却最终被送走了，说明车是带着空位开走的
         let served_with_bypass = r
