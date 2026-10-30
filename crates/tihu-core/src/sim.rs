@@ -14,7 +14,7 @@ use crate::config::{CallSurface, Config, Strategy};
 use crate::engine::{Call, CarPhase, Scratch, World};
 use crate::metrics::Metrics;
 use crate::motion::{decel_distance, state_at, time_at_distance, Dir};
-use crate::policy::{AdmitSample, Assigner, Boarding, CarId, Leg, Router, SystemView, Verdict};
+use crate::policy::{AdmitSample, Assigner, Boarding, CarId, Leg, Router, Verdict};
 use crate::rng::{Stream, Streams};
 
 /// 制动反应时间，秒。司机（控制器）从接到指令到开始减速的滞后。
@@ -78,6 +78,9 @@ pub fn run<R: Router, A: Assigner, B: Boarding>(
     assigner.reset();
     let mut rng = Streams::new(w.cfg.sim.seed);
     let mut sv = Scratch::new(w.cars.len(), w.n_levels);
+    // 轿厢的第一次推进排在 0 秒，可能比任何进场事件都早。先填一次视图，
+    // 那一步的 choose_leg 看到的就是完整的空队列与全部车辆简报，不是空切片
+    w.fill_views(&mut sv);
 
     let horizon = w.cfg.sim.horizon_s;
     // 容量要给足：每位乘客最多排两个事件（进场与弃梯），再加轿厢的推进
@@ -263,21 +266,15 @@ fn after_event<A: Assigner>(
     assign_unowned(w, assigner, sv, heap, seq);
     prune_calls(w);
     w.fill_views(sv);
-    // 归属表借内核的复用缓冲，事件之间不再申请内存
-    sv.owned.clear();
-    sv.owned.extend(w.calls.calls.iter().map(|c| c.owner));
-    let svref = SystemView {
-        now: w.now,
-        cars: &sv.briefs,
-        pending: &sv.pending,
-        all_calls: &sv.all,
-        queue_len: &sv.q,
-        top_level: w.top,
-        n_cars: w.cars.len(),
-    };
-    assigner.reassign(&svref, &mut sv.owned);
+    // 归属表暂时搬出 Scratch。视图要整块借它，两个借用不能重叠。
+    // 搬的是 Vec 本体，不申请内存，末尾再放回去
+    let mut owned = std::mem::take(&mut sv.owned);
+    owned.clear();
+    owned.extend(w.calls.calls.iter().map(|c| c.owner));
+    let svref = w.system_view(sv);
+    assigner.reassign(&svref, &mut owned);
     // 只写回真的变了的槽位，也就不必再拷一份旧归属去比
-    for (i, slot) in sv.owned.iter().enumerate() {
+    for (i, slot) in owned.iter().enumerate() {
         if w.calls.calls[i].owner == *slot {
             continue;
         }
@@ -317,6 +314,7 @@ fn after_event<A: Assigner>(
             None => w.calls.calls[i].owner = None,
         }
     }
+    sv.owned = owned;
     sync_assignments(w);
 }
 
@@ -572,15 +570,7 @@ fn assign_unowned<A: Assigner>(
         }
         let target = w.calls.calls[i].view(w.calls.calls[i].waiting);
         let owner = {
-            let view = SystemView {
-                now: w.now,
-                cars: &sv.briefs,
-                pending: &sv.pending,
-                all_calls: &sv.all,
-                queue_len: &sv.q,
-                top_level: w.top,
-                n_cars: w.cars.len(),
-            };
+            let view = w.system_view(sv);
             assigner.assign(&view, target)
         };
         let Some(car) = owner else { continue };
@@ -1325,9 +1315,10 @@ fn board_and_alight<B: Boarding>(
     let lv = w.cars[id].level.round() as i16;
     let now = w.now;
 
-    // 先下
+    // 先下。名单借 World 的复用缓冲，停靠是热路径，不能每次开一个 Vec
     let mut alighted = 0usize;
-    let mut exited: Vec<usize> = Vec::with_capacity(16);
+    let mut exited = std::mem::take(&mut w.alight_buf);
+    exited.clear();
     w.cars[id].occupants.retain(|&p| {
         if w.pax[p].to == lv {
             exited.push(p);
@@ -1462,6 +1453,7 @@ fn board_and_alight<B: Boarding>(
             w.cars[id].partial_departures += 1;
         }
     }
+    w.alight_buf = exited;
 }
 
 /// 考察队列里第 `pid` 位能否上车。
@@ -1830,7 +1822,7 @@ pub fn quick(mut cfg: Config, seed: u64) -> Run {
 mod tests {
     use super::*;
     use crate::config::{preset, CallSurface, CarSpec, StrategyMix};
-    use crate::policy::{HallCall, RunView};
+    use crate::policy::{HallCall, RunView, SystemView};
 
     fn small() -> Config {
         let mut c = Config::default();

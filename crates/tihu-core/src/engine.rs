@@ -238,7 +238,6 @@ pub struct Scratch {
     pub(crate) mine: Vec<HallCall>,
     /// 事件之间复用的外呼归属表，供重分配用
     pub(crate) owned: Vec<Option<CarId>>,
-    pub(crate) top_level: i16,
 }
 
 impl Scratch {
@@ -251,7 +250,6 @@ impl Scratch {
             car_calls: Vec::with_capacity(32),
             mine: Vec::with_capacity(16),
             owned: Vec::with_capacity(n_levels * 2),
-            top_level: 0,
         }
     }
 }
@@ -397,6 +395,8 @@ pub struct World {
     pub n_levels: usize,
     /// 每台轿厢服务哪些楼层。下标 `[car][level + basement]`
     pub car_stops: Vec<Vec<bool>>,
+    /// 下客名单的复用缓冲。停靠时借出去，用完放回，运行期不申请内存
+    pub(crate) alight_buf: Vec<usize>,
     /// 当前仿真时刻，秒
     pub(crate) now: f64,
 }
@@ -430,6 +430,7 @@ impl World {
             top,
             n_levels,
             car_stops: Vec::new(),
+            alight_buf: Vec::with_capacity(16),
             now: 0.0,
             cfg,
         };
@@ -802,7 +803,22 @@ impl World {
         for h in &self.hall {
             sv.q.push(h.len() as u32);
         }
-        sv.top_level = self.top;
+    }
+
+    /// 全机视图。字段借预先填好的缓冲，构造本身不分配。
+    ///
+    /// `top_level` 读世界自己的值，不读缓冲里的快照。第一次 `CarStep` 发生在
+    /// 任何事件之前，缓冲还没填过，读快照会拿到 0。
+    pub(crate) fn system_view<'a>(&'a self, sv: &'a Scratch) -> SystemView<'a> {
+        SystemView {
+            now: self.now,
+            cars: &sv.briefs,
+            pending: &sv.pending,
+            all_calls: &sv.all,
+            queue_len: &sv.q,
+            top_level: self.top,
+            n_cars: self.cars.len(),
+        }
     }
 
     /// 填一台轿厢的详细视图。填充缓冲区后借用切片，运行期不分配。
@@ -832,15 +848,7 @@ impl World {
             load_kg: car.load_kg as f32,
             car_calls: &sv.car_calls,
             mine: &sv.mine,
-            system: SystemView {
-                now: self.now,
-                cars: &sv.briefs,
-                pending: &sv.pending,
-                all_calls: &sv.all,
-                queue_len: &sv.q,
-                top_level: sv.top_level,
-                n_cars: self.cars.len(),
-            },
+            system: self.system_view(&*sv),
             floor_height: self.cfg.building.floor_height,
         }
     }
