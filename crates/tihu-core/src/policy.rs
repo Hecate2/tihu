@@ -63,7 +63,8 @@ pub struct SystemView<'a> {
     pub pending: &'a [HallCall],
     /// 全部还算数的外呼，含已分配。灭灯的历史记录不进视图
     pub all_calls: &'a [HallCall],
-    /// 每层的等待人数，下标是 `(level + 1) * 2 + dir`
+    /// 每层的等待人数，下标是 `level + basement`，与电梯厅名单同一套编号。
+    /// 层号 0 不存在，没有地下层时下标 0 那一格空着
     pub queue_len: &'a [u32],
     /// 最高住宅层
     pub top_level: i16,

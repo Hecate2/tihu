@@ -198,7 +198,8 @@ pub struct Metrics {
     pub ride: Summary,
     /// 门到门时间
     pub door_to_door: Summary,
-    /// 逐层统计，下标 0 是第一层住宅
+    /// 逐层统计，下标是「层号 + 地下层数」，与电梯厅名单同一套编号。
+    /// 层号 0 不存在，没有地下层时下标 0 那一格空着
     pub by_floor: Vec<FloorStats>,
 
     /// 总乘客数，含走楼梯的

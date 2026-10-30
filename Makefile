@@ -38,7 +38,7 @@ smoke: wasm
 	node tools/smoke.js
 
 test:
-	cargo test --workspace
+	cargo test --workspace --all-targets
 
 fmt:
 	cargo fmt --all
