@@ -184,6 +184,9 @@ pub struct Car {
     /// 累计往返时间样本
     pub rtt_total: f64,
     pub rtt_count: u64,
+    /// 超过一小时、没能进样本的往返次数。僵局场景下这些圈最该看，
+    /// 早先直接丢掉，于是报告反而显得比实际好
+    pub rtt_dropped: u32,
     /// 完成了几趟
     pub trips: u64,
     /// 当前这条腿的目标层。腿是「从起点一次走到这里，中途只在需要时停」的一段
@@ -493,6 +496,7 @@ impl World {
                 trip_start: 0.0,
                 rtt_total: 0.0,
                 rtt_count: 0,
+                rtt_dropped: 0,
                 trips: 0,
                 leg_target: 0,
                 leg_from: 0,

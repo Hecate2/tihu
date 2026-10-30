@@ -161,7 +161,8 @@ impl Summary {
 /// 某一层的统计。这是给买房人看的最重要一张表。
 #[derive(Debug, Clone, Default)]
 pub struct FloorStats {
-    /// 有多少乘客从这一层出发并完成行程
+    /// 在这一层结束等待的人次：上梯的与弃梯的都算。跑完时仍在车上的人
+    /// 也补记进来，否则等最久的那批人会从逐层表里整批消失
     pub count: u32,
     /// 等待时间之和
     pub wait_sum: f64,
@@ -206,6 +207,9 @@ pub struct Metrics {
     pub pax_total: usize,
     /// 完成行程的乘客数
     pub pax_served: u64,
+    /// 跑到结束一条腿都没走完的乘客数。他们还在厅里等、还在车上，
+    /// 或者还没进场。三个数加起来等于 `pax_total`
+    pub pax_unfinished: usize,
     /// 至少被跳过一次的乘客数
     pub pax_with_bypass: u64,
     /// 被跳过三次以上的乘客数
@@ -231,6 +235,8 @@ pub struct Metrics {
     pub rtt_count: u64,
     /// 往返时间均值
     pub rtt_mean: f64,
+    /// 超过一小时、没进均值的往返圈数
+    pub rtt_dropped: usize,
     /// 完成的趟数
     pub trips: u64,
 

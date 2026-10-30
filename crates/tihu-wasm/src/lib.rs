@@ -184,6 +184,8 @@ struct SimReport {
 
     pax_total: usize,
     pax_served: u64,
+    /// 跑到结束一条腿都没走完的人数
+    pax_unfinished: usize,
     serve_ratio: f64,
     stair_users: usize,
     stair_share: f64,
@@ -194,6 +196,8 @@ struct SimReport {
     n_cars: usize,
     trips: u64,
     rtt_mean: f64,
+    /// 超过一小时、没进均值的往返圈数
+    rtt_dropped: usize,
     throughput_5min: f64,
     horizon_s: f64,
 
@@ -278,6 +282,7 @@ impl SimReport {
 
             pax_total: m.pax_total,
             pax_served: m.pax_served,
+            pax_unfinished: m.pax_unfinished,
             serve_ratio,
             stair_users: m.stair_users,
             stair_share: r3(m.stair_share),
@@ -287,6 +292,7 @@ impl SimReport {
             n_cars: m.n_cars,
             trips: m.trips,
             rtt_mean: r3(m.rtt_mean),
+            rtt_dropped: m.rtt_dropped,
             throughput_5min: r3(m.throughput_5min(run.cfg().sim.horizon_s)),
             horizon_s: run.cfg().sim.horizon_s,
 
@@ -361,6 +367,7 @@ impl SimReport {
 
             pax_total: g.pax_total.round() as usize,
             pax_served: g.pax_served.round() as u64,
+            pax_unfinished: g.pax_unfinished.round() as usize,
             serve_ratio: r3(g.serve_ratio),
             stair_users: g.stair_users.round() as usize,
             stair_share: r3(g.stair_share),
@@ -370,6 +377,7 @@ impl SimReport {
             n_cars: cfg.cars.len(),
             trips: g.trips.round() as u64,
             rtt_mean: r3(g.rtt_mean),
+            rtt_dropped: g.rtt_dropped.round() as usize,
             throughput_5min: r3(g.throughput_5min),
             horizon_s: cfg.sim.horizon_s,
 

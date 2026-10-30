@@ -229,6 +229,7 @@ impl FloorAcc {
 pub struct Scalars {
     pub pax_total: f64,
     pub pax_served: f64,
+    pub pax_unfinished: f64,
     pub serve_ratio: f64,
     pub stair_users: f64,
     pub stair_share: f64,
@@ -236,6 +237,7 @@ pub struct Scalars {
     pub trips_expected: f64,
     pub trips: f64,
     pub rtt_mean: f64,
+    pub rtt_dropped: f64,
     pub throughput_5min: f64,
     pub pax_with_bypass: f64,
     pub pax_any_bypass: f64,
@@ -253,6 +255,7 @@ pub struct Scalars {
 struct ScalarAcc {
     pax_total: Acc,
     pax_served: Acc,
+    pax_unfinished: Acc,
     serve_ratio: Acc,
     stair_users: Acc,
     stair_share: Acc,
@@ -260,6 +263,7 @@ struct ScalarAcc {
     trips_expected: Acc,
     trips: Acc,
     rtt_mean: Acc,
+    rtt_dropped: Acc,
     throughput_5min: Acc,
     pax_with_bypass: Acc,
     pax_any_bypass: Acc,
@@ -277,6 +281,7 @@ impl ScalarAcc {
     fn add(&mut self, m: &Metrics, expected_trips: usize, horizon_s: f64) {
         self.pax_total.add(m.pax_total as f64);
         self.pax_served.add(m.pax_served as f64);
+        self.pax_unfinished.add(m.pax_unfinished as f64);
         self.serve_ratio.add(if m.pax_total == 0 {
             0.0
         } else {
@@ -288,6 +293,7 @@ impl ScalarAcc {
         self.trips_expected.add(expected_trips as f64);
         self.trips.add(m.trips as f64);
         self.rtt_mean.add(m.rtt_mean);
+        self.rtt_dropped.add(m.rtt_dropped as f64);
         self.throughput_5min.add(m.throughput_5min(horizon_s));
         self.pax_with_bypass.add(m.pax_with_bypass as f64);
         self.pax_any_bypass.add(m.pax_any_bypass);
@@ -305,6 +311,7 @@ impl ScalarAcc {
         Scalars {
             pax_total: self.pax_total.mean(),
             pax_served: self.pax_served.mean(),
+            pax_unfinished: self.pax_unfinished.mean(),
             serve_ratio: self.serve_ratio.mean(),
             stair_users: self.stair_users.mean(),
             stair_share: self.stair_share.mean(),
@@ -312,6 +319,7 @@ impl ScalarAcc {
             trips_expected: self.trips_expected.mean(),
             trips: self.trips.mean(),
             rtt_mean: self.rtt_mean.mean(),
+            rtt_dropped: self.rtt_dropped.mean(),
             throughput_5min: self.throughput_5min.mean(),
             pax_with_bypass: self.pax_with_bypass.mean(),
             pax_any_bypass: self.pax_any_bypass.mean(),

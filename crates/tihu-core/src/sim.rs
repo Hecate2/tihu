@@ -21,6 +21,10 @@ use crate::rng::{Stream, Streams};
 /// 待标定，先取 0.3 秒。
 const BRAKE_REACTION_S: f64 = 0.3;
 
+/// 往返时间样本的上限，秒。超过一小时的圈不进均值，只记进 `rtt_dropped`。
+/// 僵局场景下这种圈最该被看见，静默丢掉会让报告显得比实际好。
+const RTT_CAP_S: f64 = 3600.0;
+
 /// 一次仿真的输入与输出。
 pub struct Run {
     pub world: World,
@@ -1253,10 +1257,15 @@ fn settle_stop(w: &mut World, id: CarId) {
     if w.cars[id].occupants.is_empty() && w.cars[id].trip_start > 0.0 {
         if w.cars[id].last_alighted > 0 {
             let rtt = w.now - w.cars[id].trip_start;
-            if rtt > 0.0 && rtt < 3600.0 {
+            if rtt > 0.0 && rtt < RTT_CAP_S {
                 w.cars[id].rtt_total += rtt;
                 w.cars[id].rtt_count += 1;
                 w.cars[id].trips += 1;
+            } else if rtt >= RTT_CAP_S {
+                // 超长的圈照样发生过，只是不能进均值，否则一小时的僵局
+                // 会把平均往返时间拉到没有意义的量级。记一次数，
+                // 让报告能说出「还有几圈没算进来」
+                w.cars[id].rtt_dropped += 1;
             }
         }
         w.cars[id].trip_start = 0.0;
@@ -1727,6 +1736,9 @@ fn collect(w: &World, mut stalls: usize, mut stall_seconds: f64, mut m: Metrics)
     m.pax_total = w.pax.len();
     for p in &w.pax {
         if p.hops_done == 0 {
+            // 一条腿都没走完：还在厅里等、还在车上，或者还没进场。
+            // 走楼梯的人出生就算走完一条腿，不会落进这里
+            m.pax_unfinished += 1;
             continue;
         }
         if p.used_stairs || p.abandoned {
@@ -1745,6 +1757,20 @@ fn collect(w: &World, mut stalls: usize, mut stall_seconds: f64, mut m: Metrics)
         if p.requeued_after_stall {
             m.pax_after_stall += 1;
         }
+    }
+    // 跑完还在车上的人：等待已经发生，只是还没到站。等到下梯才记的话，
+    // 跑得最慢的那几趟正好是等得最久的人，均值会被系统性压低
+    for p in &w.pax {
+        if p.t_board <= 0.0 || p.t_exit > 0.0 || p.boarded_car.is_none() {
+            continue;
+        }
+        let wait = (p.t_board - p.t_arrive).max(0.0);
+        m.wait.add(wait);
+        let fs = &mut m.by_floor[w.qidx(p.from)];
+        fs.count += 1;
+        fs.wait_sum += wait;
+        fs.wait_max = fs.wait_max.max(wait);
+        fs.wait_samples.add(wait);
     }
     if m.pax_served > 0 {
         m.pax_any_bypass = m.pax_with_bypass as f64 / m.pax_served as f64;
@@ -1789,6 +1815,7 @@ fn collect(w: &World, mut stalls: usize, mut stall_seconds: f64, mut m: Metrics)
     for c in &w.cars {
         m.rtt_sum += c.rtt_total;
         m.rtt_count += c.rtt_count;
+        m.rtt_dropped += c.rtt_dropped as usize;
         m.trips += c.trips;
         m.ghost_stops += c.ghost_stops as usize;
         m.partial_departures += c.partial_departures as usize;
@@ -2489,6 +2516,65 @@ mod tests {
             two_legged.iter().all(|p| p.leg_bypass() == 0),
             "走完的腿已经结算过，单腿计数该清零"
         );
+    }
+
+    /// 跑完还在车上的人，等待样本要在汇总时补上。等到下梯才记的话，
+    /// 跑得最慢的那几趟正好是等得最久的人，均值会被系统性压低。
+    #[test]
+    fn rider_at_horizon_still_gets_a_wait_sample() {
+        let mut w = World::new(small());
+        let pid = 0;
+        let from = w.pax[pid].from;
+        w.pax[pid].t_arrive = 10.0;
+        w.pax[pid].t_board = 40.0;
+        w.pax[pid].t_exit = 0.0;
+        w.pax[pid].boarded_car = Some(0);
+        w.pax[pid].hops_done = 0;
+        let m = collect(&w, 0, 0.0, Metrics::with_floors(w.n_levels));
+        assert_eq!(m.wait.count, 1, "还在车上的人也该有一条等待样本");
+        assert!((m.wait.mean() - 30.0).abs() < 1e-9, "等待时间是上梯减进场");
+        let fs = &m.by_floor[w.qidx(from)];
+        assert_eq!(fs.count, 1, "逐层人数要跟着记，否则均值分母对不上");
+        assert!((fs.wait_sum - 30.0).abs() < 1e-9);
+        let left = w.pax.iter().filter(|p| p.hops_done == 0).count();
+        assert_eq!(m.pax_unfinished, left, "没走完腿的人都算未完成");
+        assert_eq!(
+            m.pax_total as u64,
+            m.pax_served + m.stair_users as u64 + m.pax_unfinished as u64,
+            "送达、走楼梯、未完成三档应当正好分完总人数"
+        );
+    }
+
+    /// 超过一小时的圈不进均值，但要留下计数。静默丢掉会让僵局场景
+    /// 看起来比实际好：最慢的那几圈正是卡得最久的。
+    #[test]
+    fn overlong_trip_is_counted_as_dropped() {
+        let mut w = World::new(small());
+        w.now = 10_000.0;
+        w.cars[0].trip_start = 1.0;
+        w.cars[0].last_alighted = 1;
+        w.cars[0].occupants.clear();
+        settle_stop(&mut w, 0);
+        assert_eq!(w.cars[0].rtt_dropped, 1);
+        assert_eq!(w.cars[0].rtt_count, 0, "超长的圈不进均值");
+        assert_eq!(w.cars[0].trips, 0, "也不记成完成一趟");
+        let m = collect(&w, 0, 0.0, Metrics::with_floors(w.n_levels));
+        assert_eq!(m.rtt_dropped, 1);
+    }
+
+    /// 全局等待样本数要等于逐层人数之和。两条路径各记各的，
+    /// 一处漏记就会让报告里的两个数对不上。
+    #[test]
+    fn wait_samples_add_up_across_floors() {
+        // 一梯跑短窗口，跑到最后还有人没下车，正好覆盖汇总时补记的那条路径
+        let mut c = preset("std_tall").unwrap();
+        c.sim.horizon_s = 3900.0;
+        c.cars.truncate(1);
+        for cfg in [preset("std_tall").unwrap(), c] {
+            let r = quick(cfg, 42);
+            let sum: u64 = r.metrics.by_floor.iter().map(|f| f.count as u64).sum();
+            assert_eq!(r.metrics.wait.count, sum);
+        }
     }
 
     /// 过期计时器不赶人。换腿和僵局重排都会推迟 abandon_at，

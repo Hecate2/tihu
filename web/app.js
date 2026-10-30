@@ -728,6 +728,7 @@ function render(s) {
   const rows2 = [
     ["总人数 / 送达人数", s.pax_total + " / " + s.pax_served],
     ["送达比例", fmt(s.serve_ratio * 100, 1) + "%"],
+    ["未完成行程", s.pax_unfinished + " 人"],
     ["走楼梯（含半路改走）", s.stair_users + "（" + fmt(s.stair_share * 100, 1) + "%）"],
     ["其中半路改走楼梯", s.abandoned + " 人"],
     ["被跳过：位子不够", noSpace + " 次"],
@@ -736,6 +737,7 @@ function render(s) {
     ["满员直接开过", s.full_bypasses + " 次"],
     ["太快停不住", s.overshoots + " 次"],
     ["跑一圈平均用时", fmt(s.rtt_mean) + " 秒"],
+    ["超过一小时没算进平均的圈", s.rtt_dropped + " 圈"],
     ["每 5 分钟送走", fmt(s.throughput_5min) + " 人"],
     ["超载卡死", s.stalls + " 次，累计 " + fmt(s.stall_seconds) + " 秒"],
     ["超载被请下车", s.pax_after_stall + " 人"],

@@ -56,8 +56,8 @@ function mergeScalars(parts) {
     wait_hist_bin_s: first.wait_hist_bin_s,
   };
   for (const k of [
-    "pax_total", "pax_served", "serve_ratio", "stair_users", "stair_share",
-    "abandoned", "trips_expected", "trips", "rtt_mean", "throughput_5min",
+    "pax_total", "pax_served", "pax_unfinished", "serve_ratio", "stair_users", "stair_share",
+    "abandoned", "trips_expected", "trips", "rtt_mean", "rtt_dropped", "throughput_5min",
     "pax_with_bypass", "pax_any_bypass", "pax_after_stall", "stalls", "stall_seconds",
     "calls_orphaned", "ghost_stops", "partial_departures", "full_bypasses", "overshoots",
   ]) {
@@ -65,8 +65,8 @@ function mergeScalars(parts) {
   }
   // 个数显示成整数，与内核 of_batch 的 round 口径一致
   for (const k of [
-    "pax_total", "pax_served", "stair_users", "abandoned", "trips_expected",
-    "trips", "pax_with_bypass", "pax_after_stall", "stalls", "calls_orphaned",
+    "pax_total", "pax_served", "pax_unfinished", "stair_users", "abandoned", "trips_expected",
+    "trips", "rtt_dropped", "pax_with_bypass", "pax_after_stall", "stalls", "calls_orphaned",
     "ghost_stops", "partial_departures", "full_bypasses", "overshoots",
   ]) {
     out[k] = Math.round(out[k]);
