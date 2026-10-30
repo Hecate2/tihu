@@ -10,7 +10,7 @@
 //! 都不会「路过该停的层」，也不会「停在没活可干的层」。
 
 use crate::builtin::{DefaultBoarding, DownPeakSweep};
-use crate::config::{Boarding as BoardCfg, CallSurface, Config, Strategy};
+use crate::config::{CallSurface, Config, Strategy};
 use crate::engine::{Call, CarPhase, Scratch, World};
 use crate::metrics::Metrics;
 use crate::motion::{decel_distance, state_at, time_at_distance, Dir};
@@ -167,6 +167,12 @@ pub fn run<R: Router, A: Assigner, B: Boarding>(
                 }
                 let qi = w.qidx(level);
                 w.hall[qi].push(pid);
+                // 有车正开着门停在这层时，新到的人可以直接上。策略要求延长
+                // 开门时，这段保持开启的时长就是留给这些人的
+                if board_stopped(&mut w, pid, boarding, &mut rng) {
+                    after_event(&mut w, assigner, &mut sv, &mut heap, &mut seq);
+                    continue;
+                }
                 let pre_owned = register_calls(&mut w, level, &[pid]);
                 assign_unowned(&mut w, assigner, &mut sv, &mut heap, &mut seq);
                 // 出生带主的独立呼叫不走派梯，这里补同步待办、插停靠、
@@ -929,10 +935,23 @@ fn step_car<R: Router, B: Boarding>(
             }
 
             CarPhase::Boarding => {
-                // 关门时刻到，本次停靠结束
-                settle_stop(w, id);
-                w.cars[id].phase = CarPhase::Idle;
-                continue;
+                // 关门判据交给策略。默认实现到点就关，时序与旧版一致。
+                // 返回 false 就再开一个保持开启时长，这期间到的人还能上，
+                // 见主循环 `Kind::Arrive` 分支
+                let close = {
+                    w.fill_views(sv);
+                    let v = w.fill_run_view(sv, id);
+                    boarding.close_now(&v)
+                };
+                if close {
+                    settle_stop(w, id);
+                    w.cars[id].phase = CarPhase::Idle;
+                    continue;
+                }
+                let hold = w.cfg.cars[id].doors.dwell_s as f64;
+                w.cars[id].holding = true;
+                w.cars[id].next_event = w.now + hold.max(1e-3);
+                break;
             }
 
             CarPhase::Stalled => {
@@ -1177,7 +1196,9 @@ fn begin_stop<B: Boarding>(
         base + doors.dwell_s as f64 + in_t + doors.close_s as f64 + doors.ctrl_resp_s as f64;
     let close_at = w.cars[id].stop_started + total;
 
-    // 幽灵停站：开门了却没人上、也没人下，白损失一次停靠开销
+    // 幽灵停站：开门了却没人上、也没人下，白损失一次停靠开销。
+    // 这么早就记，是因为绝大多数停靠当场就定下了。策略要求延长开门时，
+    // 后面真有人上来的话在 `board_stopped` 里撤销这一笔
     if w.cars[id].last_boarded == 0 && w.cars[id].last_alighted == 0 {
         w.cars[id].ghost_stops += 1;
     }
@@ -1206,6 +1227,7 @@ fn settle_stop(w: &mut World, id: CarId) {
     let lv = w.cars[id].level.round() as i16;
     w.cars[id].stops_planned.retain(|&(l, _)| l != lv);
     w.cars[id].stop_started = 0.0;
+    w.cars[id].holding = false;
     // 记下刚收尾的层，Idle 里据此压制原地重开门
     w.cars[id].settled_level = Some(lv);
     // 车上清空才算一趟往返走完。只有真的有人下过车才记样本，
@@ -1484,11 +1506,10 @@ fn try_board_one<B: Boarding>(
                 w.pax[pid].no_space_count += 1;
                 return false;
             }
-            // 中间地带要掷骰子。策略对象本身不掷，随机性归内核。
+            // 中间地带要掷骰子。概率由策略给，随机性归内核。
             // 这一步是红线 3 的核心：越接近满载，越可能有人放弃。
-            // 概率按配置里的拒挤曲线算，不能用写死的默认值，
-            // 否则调参的人拧哪个旋钮都没反应
-            let prob = default_accept_prob(&w.cfg.boarding, &sample, tol);
+            // 拿策略的概率而不是配置里的曲线，写新 `Boarding` 才能真的改判据
+            let prob = boarding.accept_prob(&sample, tol);
             if prob < 1.0 && !rng.chance(Stream::Squeeze, prob) {
                 w.pax[pid].declined_count += 1;
                 return false;
@@ -1509,13 +1530,45 @@ fn try_board_one<B: Boarding>(
     }
 }
 
-/// `DefaultBoarding` 的概率公式。放在这里是因为随机性归内核，策略对象本身不掷骰子。
-/// 曲线按配置走，调用方把 `w.cfg.boarding` 传进来。
-fn default_accept_prob(cfg: &BoardCfg, s: &AdmitSample, tol: f64) -> f64 {
-    if s.free_slots == 0 {
-        return 0.0;
+/// 新到的人能不能直接上一台正开着门的车。
+///
+/// 只在策略要求延长开门时才会走到这里，见 `Boarding::close_now`。
+/// 上去了就把人从电梯厅拿掉，外呼上的人数跟着刷新。
+fn board_stopped<B: Boarding>(w: &mut World, pid: usize, boarding: &B, rng: &mut Streams) -> bool {
+    let lv = w.pax[pid].from;
+    let now = w.now;
+    let mut boarded: Option<CarId> = None;
+    for id in 0..w.cars.len() {
+        // 只看策略要求延长开门的那一段。正常开门窗口内的到达仍走旧路径，
+        // 默认策略的结果一个数都不变
+        if !w.cars[id].holding {
+            continue;
+        }
+        if w.cars[id].phase != CarPhase::Boarding {
+            continue;
+        }
+        if w.cars[id].level.round() as i16 != lv {
+            continue;
+        }
+        let want = board_dir_at(w, id, lv);
+        if try_board_one(w, id, lv, pid, want, boarding, now, rng) {
+            boarded = Some(id);
+            break;
+        }
     }
-    cfg.accept_prob(s.load_ratio, tol, s.waited_s)
+    let Some(id) = boarded else {
+        return false;
+    };
+    let qi = w.qidx(lv);
+    w.hall[qi].retain(|&p| p != pid);
+    // 这站原本按空停记了一次幽灵。延长开门期间真有人上来，就把这笔撤掉
+    if w.cars[id].last_boarded == 0 && w.cars[id].last_alighted == 0 {
+        w.cars[id].ghost_stops = w.cars[id].ghost_stops.saturating_sub(1);
+    }
+    w.cars[id].last_boarded += 1;
+    refresh_waiting(w, lv, Dir::Up);
+    refresh_waiting(w, lv, Dir::Down);
+    true
 }
 
 /// 一次僵持的结果。
@@ -2491,6 +2544,171 @@ mod tests {
         w.pax[pid].strategy = Strategy::PressBoth;
         let both = try_board_one(&mut w, 0, 5, pid, Dir::Up, &boarding, 100.0, &mut rng);
         assert!(both, "双按的人应当能坐上先到的上行轿厢");
+    }
+
+    /// 上车概率由策略给，不能拿配置里的曲线顶替。
+    ///
+    /// 修好之前引擎用 `config.boarding` 算概率，自定义 `Boarding` 把概率设成
+    /// 0 也照样按默认曲线放人。这里让策略返回 0，断言乘客被记成不肯挤。
+    #[test]
+    fn strategy_probability_overrides_default_curve() {
+        struct RefuseBoarding;
+        impl Boarding for RefuseBoarding {
+            fn admit_one(&self, _s: &AdmitSample, _tol: f64) -> Verdict {
+                Verdict::Admit
+            }
+            fn accept_prob(&self, _s: &AdmitSample, _tol: f64) -> f64 {
+                0.0
+            }
+        }
+
+        let mut w = World::new(small());
+        let pid = 0;
+        {
+            let p = &mut w.pax[pid];
+            p.from = 5;
+            p.to = 1;
+            p.t_arrive = 0.0;
+            p.t_board = 0.0;
+            p.t_exit = 0.0;
+            p.boarded_car = None;
+            p.used_stairs = false;
+            p.abandoned = false;
+            p.weight = 60.0;
+            p.tol = 0.0;
+            p.strategy = Strategy::Honest;
+        }
+        // 空车按默认曲线是 100% 放人，策略说 0 就该 0
+        assert_eq!(w.cfg.boarding.accept_prob(0.0, 0.0, 0.0), 1.0);
+
+        let mut rng = Streams::new(w.cfg.sim.seed);
+        let refused = try_board_one(&mut w, 0, 5, pid, Dir::Down, &RefuseBoarding, 0.0, &mut rng);
+        assert!(!refused, "策略给出的概率是 0，不该放人");
+        assert_eq!(w.pax[pid].declined_count, 1);
+        assert_eq!(w.pax[pid].boarded_car, None);
+    }
+
+    /// 车门关不关由策略决定。返回 false 时车继续开门，到点再问一次。
+    #[test]
+    fn close_now_false_holds_the_doors() {
+        struct HoldOnce {
+            left: std::cell::Cell<u32>,
+        }
+        impl Boarding for HoldOnce {
+            fn admit_one(&self, s: &AdmitSample, _tol: f64) -> Verdict {
+                if s.free_slots == 0 {
+                    Verdict::NoSpace
+                } else {
+                    Verdict::Admit
+                }
+            }
+            fn close_now(&self, _v: &RunView<'_>) -> bool {
+                let n = self.left.get();
+                if n > 0 {
+                    self.left.set(n - 1);
+                    return false;
+                }
+                true
+            }
+        }
+
+        let mut w = World::new(small());
+        w.now = 50.0;
+        w.cars[0].phase = CarPhase::Boarding;
+        w.cars[0].level = 3.0;
+        w.cars[0].stop_started = 50.0;
+        w.cars[0].next_event = 50.0;
+        // 让这站不算幽灵，专心看关门时机
+        w.cars[0].last_alighted = 1;
+        let boarding = HoldOnce {
+            left: std::cell::Cell::new(1),
+        };
+        let mut router = DownPeakSweep;
+        let mut sv = Scratch::new(w.cars.len(), w.n_levels);
+        let mut heap = std::collections::BinaryHeap::new();
+        let mut seq = 0u64;
+        let mut rng = Streams::new(w.cfg.sim.seed);
+        let mut metrics = Metrics::with_floors(w.n_levels);
+
+        step_car(
+            &mut w,
+            0,
+            &mut router,
+            &boarding,
+            &mut sv,
+            &mut heap,
+            &mut seq,
+            &mut rng,
+            &mut metrics,
+        );
+        assert_eq!(
+            w.cars[0].phase,
+            CarPhase::Boarding,
+            "策略要求继续开门，不该收尾"
+        );
+        assert_eq!(
+            w.cars[0].next_event,
+            50.0 + w.cfg.cars[0].doors.dwell_s as f64,
+            "该再等一个保持开启时长"
+        );
+        assert!(w.cars[0].holding, "延长开门期间要允许新到的人上车");
+
+        // 下一次到点，策略放行，这一站结束
+        w.now = w.cars[0].next_event;
+        step_car(
+            &mut w,
+            0,
+            &mut router,
+            &boarding,
+            &mut sv,
+            &mut heap,
+            &mut seq,
+            &mut rng,
+            &mut metrics,
+        );
+        // 策略放行之后这一站必须结束，车可能接着去主入口层待命
+        assert_ne!(w.cars[0].phase, CarPhase::Boarding);
+        assert_eq!(w.cars[0].stop_started, 0.0);
+        assert!(!w.cars[0].holding);
+    }
+
+    /// 车门开着时新到的人可以直接上，这是延长开门的意义所在。
+    #[test]
+    fn late_arrival_boards_while_doors_are_open() {
+        let mut w = World::new(small());
+        let pid = 0;
+        {
+            let p = &mut w.pax[pid];
+            p.from = 5;
+            p.to = 1;
+            p.t_arrive = 100.0;
+            p.t_board = 0.0;
+            p.t_exit = 0.0;
+            p.boarded_car = None;
+            p.used_stairs = false;
+            p.abandoned = false;
+            p.weight = 60.0;
+            p.tol = 0.0;
+            p.strategy = Strategy::Honest;
+        }
+        w.now = 100.0;
+        w.cars[0].phase = CarPhase::Boarding;
+        w.cars[0].level = 5.0;
+        w.cars[0].holding = true;
+        let qi = w.qidx(5);
+        w.hall[qi].push(pid);
+
+        let boarding = DefaultBoarding {
+            cfg: w.cfg.boarding.clone(),
+        };
+        let mut rng = Streams::new(w.cfg.sim.seed);
+        assert!(
+            board_stopped(&mut w, pid, &boarding, &mut rng),
+            "开着门的车该接走新到的人"
+        );
+        assert_eq!(w.pax[pid].boarded_car, Some(0));
+        assert!(w.hall[qi].is_empty(), "上了车的人要离开电梯厅");
+        assert_eq!(w.cars[0].last_boarded, 1);
     }
 
     /// 红线 3：挤不上是随机的，车会带着空位开走，两类原因要分开记。

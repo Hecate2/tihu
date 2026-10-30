@@ -240,6 +240,12 @@ pub trait Boarding {
 
     /// 考察一位乘客是否上车
     fn admit_one(&self, s: &AdmitSample, tol: f64) -> Verdict;
+
+    /// 这位乘客实际能上车的概率，默认 1.0
+    fn accept_prob(&self, s: &AdmitSample, tol: f64) -> f64 { 1.0 }
+
+    /// 车门是否该关，默认到了关门时刻就关
+    fn close_now(&self, v: &RunView<'_>) -> bool { true }
 }
 
 pub enum Verdict {
@@ -254,7 +260,13 @@ pub enum Verdict {
 **`NoSpace` 与 `Declined` 必须分开。** 前者说明运力真不够，后者说明运力够但人
 不愿意。混成一个数会让「这个楼盘要不要加电梯」的判断失真。
 
-车门什么时候关不归算法管，内核按开关门时序自己算。
+`accept_prob` 只在 `admit_one` 返回 `Admit` 之后才问。引擎拿这个概率在自己的
+随机流上掷一次，策略本身不碰随机数。默认返回 1.0，也就是你说了可以上就一定上。
+想复刻默认的拒挤曲线，就实现成 `DefaultBoarding` 那样。
+
+关门时刻由内核按开关门时序算出来。到点之后引擎问一次 `close_now`。返回 `true`
+就收尾发车。返回 `false` 就再开一个保持开启时长，这段时间里走到电梯厅的人还能
+直接上车。一直返回 `false` 会让车停在原地，仿真由时间上限兜底。
 
 ---
 

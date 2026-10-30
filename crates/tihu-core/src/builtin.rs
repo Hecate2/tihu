@@ -387,11 +387,9 @@ impl Boarding for DefaultBoarding {
             Verdict::Admit
         }
     }
-}
 
-impl DefaultBoarding {
-    /// 给出这位乘客愿意上来的概率。引擎拿它掷骰子。
-    pub fn accept_prob(&self, s: &AdmitSample, tol: f64) -> f64 {
+    /// 拒挤曲线来自配置。引擎拿它掷骰子，见 `docs/MODEL.md` 第 5.5.2 节。
+    fn accept_prob(&self, s: &AdmitSample, tol: f64) -> f64 {
         if s.free_slots == 0 {
             return 0.0;
         }

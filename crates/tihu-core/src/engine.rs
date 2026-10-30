@@ -175,6 +175,8 @@ pub struct Car {
     pub last_alighted: usize,
     /// 本次停靠开始时刻
     pub stop_started: f64,
+    /// 策略要求延长开门。新一轮到站的人可以在这段时间里直接上车
+    pub holding: bool,
     /// 僵持开始的时刻
     pub stall_since: f64,
     /// 上一趟完成的时刻，用来算往返时间
@@ -485,6 +487,7 @@ impl World {
                 last_boarded: 0,
                 last_alighted: 0,
                 stop_started: 0.0,
+                holding: false,
                 stall_since: 0.0,
                 trip_start: 0.0,
                 rtt_total: 0.0,

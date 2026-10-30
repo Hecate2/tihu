@@ -245,7 +245,8 @@ pub trait Router {
 }
 ```
 
-`Assigner` 保留 `assign` 与 `reassign`，`Boarding` 保留 `admit_one` 与 `close_now`。三者互不耦合。研究者只想改走向，就只写 `Router`，不用碰另外两个。
+`Assigner` 保留 `assign` 与 `reassign`。`Boarding` 保留 `admit_one`、`accept_prob`
+与 `close_now`。三者互不耦合。研究者只想改走向，就只写 `Router`，不用碰另外两个。
 
 ### 6.2 泛型单体化
 
