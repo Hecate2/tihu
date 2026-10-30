@@ -1246,6 +1246,14 @@ impl Config {
                 "策略占比之和要大于 0".into(),
             ));
         }
+        // 多按要有独立的车按钮可按。共用面板上按十次还是一条外呼，
+        // 这个比例会被静默吃掉，界面上却看不出差别
+        if self.call_surface != CallSurface::PerCarPanel && s.multi_call > 0.0 {
+            v.issues.push(Issue::warn(
+                "multi_call_needs_per_car_panel",
+                "同时呼叫多台只在独立面板下才有区别，当前是共用面板，这一项按一次算".into(),
+            ));
+        }
         // 恶意行为是两个独立的乘客比例，不参与策略占比的归一化
         let m = &self.malice;
         for (what, share) in [

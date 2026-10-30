@@ -608,9 +608,11 @@ pub fn report_json(cfg_json: &str, router: &str) -> String {
         let run = dispatch(cfg, row.which);
         SimReport::of(&run, row.name)
     };
+    // 校验通过也要把警告带出去。少这一句，界面上永远看不到「这么配没意义」
+    let issues: Vec<IssueDto> = v.issues.iter().map(IssueDto::of).collect();
     json(&Response {
         ok: true,
-        issues: vec![],
+        issues,
         sim: Some(sim),
     })
 }
@@ -802,6 +804,19 @@ mod tests {
         let v: serde_json::Value = serde_json::from_str(&r).unwrap();
         assert_eq!(v["ok"], false);
         assert_eq!(v["issues"][0]["code"], "no_cars");
+    }
+
+    /// 校验通过也要把警告带出去，否则界面上永远看不到「这么配没意义」。
+    #[test]
+    fn warnings_survive_a_successful_run() {
+        let mut c = tihu_core::config::preset("std_residential").unwrap();
+        c.strategy.honest = 0.0;
+        c.strategy.multi_call = 1.0;
+        let r = report_json(&serde_json::to_string(&c).unwrap(), "down_peak_sweep");
+        let v: serde_json::Value = serde_json::from_str(&r).unwrap();
+        assert_eq!(v["ok"], true, "{r}");
+        assert_eq!(v["issues"][0]["code"], "multi_call_needs_per_car_panel");
+        assert_eq!(v["issues"][0]["severity"], "warn");
     }
 
     #[test]

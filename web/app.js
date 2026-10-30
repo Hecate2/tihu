@@ -114,7 +114,7 @@ const LIVE_IDS = [
   "res_floors", "units", "ppu", "area", "fh", "basement", "gfr",
   "ncars", "load", "speed", "stops",
   "pattern", "dep", "window", "ret",
-  "stairs", "pressb", "overload",
+  "stairs", "pressb", "percar", "spam", "runner", "overload",
   "router", "seed", "seed_count",
 ];
 
@@ -233,6 +233,15 @@ function applyUi(cfg) {
   cfg.strategy.press_both = pbKept;
   cfg.strategy.honest = Math.max(0, 1 - pbKept - other);
 
+  // 面板形式。共用面板上一次按键只出一条外呼；独立面板一车一按钮，
+  // 乘客能指定轿厢，同时呼叫多台也才有区别
+  cfg.call_surface = ui.percar.checked ? "per_car_panel" : "group_single";
+
+  // 恶意行为与按键策略互不排斥，各自独立成比例
+  cfg.malice = cfg.malice || {};
+  cfg.malice.inside_spam_share = num(ui.spam);
+  cfg.malice.press_and_run_share = num(ui.runner);
+
   // 随机种子跑几个。从随机种子开始连跑 count 个，内核把中间每个
   // 种子都跑一遍再汇总。填 1 或者清空，都当单次跑。
   const seedA = Math.max(0, Math.round(num(ui.seed)));
@@ -299,6 +308,9 @@ function loadIntoUi(cfg) {
   ui.stairs.checked = !!cfg.stairs.enabled;
   ui.overload.checked = !!cfg.overload.enabled;
   ui.pressb.value = cfg.strategy.press_both || 0;
+  ui.percar.checked = cfg.call_surface === "per_car_panel";
+  ui.spam.value = (cfg.malice && cfg.malice.inside_spam_share) || 0;
+  ui.runner.value = (cfg.malice && cfg.malice.press_and_run_share) || 0;
 
   // 种子不归预设管，用户填的留着。预设切来切去不该把个数打回 1。
   syncLabels();
@@ -314,6 +326,8 @@ function syncLabels() {
   document.getElementById("dep_v").textContent = pct(num(ui.dep));
   document.getElementById("ret_v").textContent = pct(num(ui.ret));
   document.getElementById("pressb_v").textContent = pct(num(ui.pressb));
+  document.getElementById("spam_v").textContent = pct(num(ui.spam));
+  document.getElementById("runner_v").textContent = pct(num(ui.runner));
   markRouter();
 }
 
@@ -529,6 +543,8 @@ async function runParallel(cfg, routerId, token, onProgress) {
   const seq = ++pool.seq;
   const ranges = splitRange(from, to, n);
   let done = 0;
+  // 警告只看配置，每个分片都一样，取第一片的就够
+  let issues = [];
   const jobs = [];
   for (let i = 0; i < n; i++) {
     const [a, b] = ranges[i];
@@ -541,6 +557,7 @@ async function runParallel(cfg, routerId, token, onProgress) {
         throw new Error(((res && res.issues && res.issues[0]) || {}).message || "分片没跑起来");
       }
       done += b - a + 1;
+      if (i === 0) issues = res.issues || [];
       if (token === runToken) onProgress(done, total);
       return res.sim;
     });
@@ -549,7 +566,7 @@ async function runParallel(cfg, routerId, token, onProgress) {
   try {
     const partials = await Promise.all(jobs);
     if (token !== runToken) return { cancelled: true };
-    return { sim: mergeReports(partials) };
+    return { sim: mergeReports(partials), issues };
   } catch (e) {
     // 被顶掉不算失败，回退同步只会白算一遍旧配置
     if (e && e.cancelled) return { cancelled: true };
@@ -611,7 +628,7 @@ async function run() {
       });
       if (token !== runToken || r.cancelled) return;
       sim = r.sim;
-      showIssues([]);
+      showIssues(r.issues);
     } catch (e) {
       // 工人起不来就回退同步，保证旧环境照样出数
       if (token !== runToken) return;

@@ -212,6 +212,9 @@ pub struct Car {
     /// 内选面板上亮着、但车里没有对应乘客的层。乱按的人按下的就是这些。
     /// 按一次亮到车停那一层为止，中途乘客下车也不会灭
     pub extra_calls: Vec<i16>,
+    /// 独立面板的按键槽位：每层每方向一条，只归这一台车。
+    /// 同一台车同一层同一方向重复按只更新人数，不再多出一条呼叫
+    pub ex_slots: Vec<Option<u32>>,
     /// 刚在哪一层收过尾。停靠完还停在这一层时，不许原地再开一次门，
     /// 否则车满不了又走不掉，会在同一层反复空停靠卡死（分区梯的死锁就出在这）
     pub settled_level: Option<i16>,
@@ -368,6 +371,16 @@ impl CallBoard {
         (id, true)
     }
 
+    /// 独立面板上按下某一台车的按钮。出生就带主，不走派梯。
+    ///
+    /// 去重不在这里做：同一台车同一层同一方向的槽位在 `Car::ex_slots` 里，
+    /// 由调用方先查。这里只负责建一条新呼叫。
+    pub fn register_for_car(&mut self, level: i16, dir: Dir, waiting: usize, car: CarId) -> u32 {
+        let (id, _) = self.register(level, dir, waiting, true);
+        self.calls[id as usize].owner = Some(car);
+        id
+    }
+
     /// 到站消号：属于 `owner` 在 `level` 层、`dir` 方向的独立呼叫消号。
     ///
     /// 只在「这层这个方向确实没人再等」时由调用方触发。共享槽位不动，
@@ -517,6 +530,7 @@ impl World {
                 leg_dist: 0.0,
                 stops_planned: Vec::with_capacity(n_levels * 2),
                 extra_calls: Vec::with_capacity(4),
+                ex_slots: vec![None; n_levels * 2],
                 settled_level: None,
                 ghost_stops: 0,
                 partial_departures: 0,

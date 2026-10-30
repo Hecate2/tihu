@@ -730,7 +730,8 @@ fn count_waiting(w: &World, level: i16, dir: Dir) -> usize {
 
 /// 登记外呼。红线 1 与红线 2 都在这个函数里。
 ///
-/// 返回出生就带主的独立呼叫编号。它们不走派梯，调用方负责补
+/// 共享面板同层同方向只留一条外呼；独立面板一车一个按钮，同一台车同一层
+/// 同一方向重复按只更新人数。返回出生就带主的独立呼叫编号，调用方负责补
 /// 同步待办、插停靠、叫醒三件套（见 Arrive）。
 fn register_calls(w: &mut World, level: i16, newly: &[usize]) -> Vec<u32> {
     if newly.is_empty() {
@@ -741,56 +742,79 @@ fn register_calls(w: &mut World, level: i16, newly: &[usize]) -> Vec<u32> {
     for &pid in newly {
         let p = w.pax[pid].clone();
         let wanted = if p.to > level { Dir::Up } else { Dir::Down };
-        match p.strategy {
-            // 红线 1 的基线：只按自己真正想去的方向
-            Strategy::Honest => {
-                let n = count_waiting(w, level, wanted);
-                w.calls.register(level, wanted, n, false);
+        // 这位乘客要按哪几个方向。反向叫梯的人只按上行，双按的人两边都按
+        let dirs: &[Dir] = match p.strategy {
+            Strategy::Honest | Strategy::MultiCall => std::slice::from_ref(&wanted),
+            Strategy::PressBoth => &[Dir::Up, Dir::Down],
+            Strategy::PressUpOnly => &[Dir::Up],
+        };
+        for &dir in dirs {
+            let n = count_waiting(w, level, dir);
+            if !per_car {
+                w.calls.register(level, dir, n, false);
+                continue;
             }
-            // 红线 2：上下都按。哪趟先来上哪趟
-            Strategy::PressBoth => {
-                let up = count_waiting(w, level, Dir::Up);
-                let down = count_waiting(w, level, Dir::Down);
-                w.calls.register(level, Dir::Up, up, false);
-                w.calls.register(level, Dir::Down, down, false);
-            }
-            // 先按上行，跟车折返再下来
-            Strategy::PressUpOnly => {
-                let n = count_waiting(w, level, Dir::Up);
-                w.calls.register(level, Dir::Up, n, false);
-            }
-            // 同时呼叫多台。只有独立面板才做得到
-            Strategy::MultiCall => {
-                if per_car {
-                    let n = count_waiting(w, level, wanted);
-                    let k = w.cars.len().min(2);
-                    for t in 0..k {
-                        let (id, _) = w.calls.register(level, wanted, n, true);
-                        // 独立面板一车一按钮：这条呼叫从出生就属于这台车。
-                        // 车不服务这一层或已经卡死，就近换一台服务的，
-                        // 与 assign_unowned 里那道兜底同一条。实在没车可换
-                        // 就留成无主，等派梯捡走，总比出生即死锁强
-                        let owner = if car_can_serve(w, t, level) {
-                            t
-                        } else {
-                            let Some(alt) = w.least_busy_serving(level) else {
-                                continue;
-                            };
-                            alt
-                        };
-                        if let Some(c) = w.calls.get_mut(id) {
-                            c.owner = Some(owner);
-                        }
-                        pre_owned.push(id);
+            // 独立面板：多呼叫按满所有服务这一层的车，其余策略只按最闲的一台
+            if matches!(p.strategy, Strategy::MultiCall) {
+                let mut any = false;
+                for car in 0..w.cars.len() {
+                    if !car_can_serve(w, car, level) {
+                        continue;
                     }
-                } else {
-                    let n = count_waiting(w, level, wanted);
-                    w.calls.register(level, wanted, n, false);
+                    pre_owned.push(press_car_panel(w, car, level, dir, n));
+                    any = true;
                 }
+                // 全场没有一台能接（都僵死了），也要留一条无主独立呼叫。
+                // 派梯在 `should_dispatch` 里认它，僵局解除后能捡起来。
+                // 出生没有归属，所以不进 pre_owned
+                if !any {
+                    w.calls.register(level, dir, n, true);
+                }
+            } else if let Some(car) = pick_panel_car(w, level, p.to) {
+                pre_owned.push(press_car_panel(w, car, level, dir, n));
+            } else {
+                // 同上：没有任何车此刻能接，留一条无主的等僵局解除
+                w.calls.register(level, dir, n, true);
             }
         }
     }
     pre_owned
+}
+
+/// 独立面板上该按哪台车：既停这一层、也送得了目的层，其中活最少的那台。
+///
+/// 两样都满足的找不到时，退回「至少能来接这一层」的那台。上车之后
+/// `waiting_rescue` 还会让别的、送得了目的层的车顺手接走。
+fn pick_panel_car(w: &World, level: i16, to: i16) -> Option<CarId> {
+    (0..w.cars.len())
+        .filter(|&c| car_can_serve(w, c, level) && w.car_serves(c, to))
+        .min_by_key(|&c| (w.cars[c].assigned.len(), w.cars[c].occupants.len(), c))
+        .or_else(|| w.least_busy_serving(level))
+}
+
+/// 在某台车的独立面板上按一下。同一台车同一层同一方向只留一条呼叫，
+/// 重复按只更新等待人数。
+fn press_car_panel(w: &mut World, car: CarId, level: i16, dir: Dir, waiting: usize) -> u32 {
+    let s = Call::slot_index(level, dir, w.basement);
+    if let Some(id) = w.cars[car].ex_slots[s] {
+        // 灯还亮着才复用：车到站消过号之后，槽位里剩的是一条死呼叫
+        if let Some(c) = w.calls.get_mut(id) {
+            if c.owner == Some(car) {
+                c.waiting = waiting;
+                return id;
+            }
+        }
+    }
+    let id = w.calls.register_for_car(level, dir, waiting, car);
+    w.cars[car].ex_slots[s] = Some(id);
+    id
+}
+
+/// 到站擦掉这一台车在这一层这一方向的独立呼叫，并把槽位一起放开。
+fn clear_car_panel(w: &mut World, car: CarId, level: i16, dir: Dir) {
+    w.calls.clear_exclusive_owned_by(car, level, dir);
+    let s = Call::slot_index(level, dir, w.basement);
+    w.cars[car].ex_slots[s] = None;
 }
 
 /// 把一条外呼插进某台正在途中的轿厢。真刹不住才记一次越站，
@@ -1236,7 +1260,7 @@ fn begin_stop<B: Boarding>(
     for dir in [Dir::Up, Dir::Down] {
         if !waiting_for(w, lv, dir) {
             kill_call(w, lv, dir);
-            w.calls.clear_exclusive_owned_by(id, lv, dir);
+            clear_car_panel(w, id, lv, dir);
         } else {
             // 刚接走一批人，外呼上记的人数要跟着降，别让算法以为队还很长
             refresh_waiting(w, lv, dir);
@@ -3153,6 +3177,84 @@ mod tests {
             "第二台车应当扑空出幽灵停站，实际 {}",
             r.metrics.ghost_stops
         );
+    }
+
+    /// 多呼叫要按满每一台车，但同一台车同一层只留一条。
+    ///
+    /// 早先固定只叫前两台，三台以上的楼低估了多按的代价；同时每条
+    /// 独立呼叫都是新建的，十个人一起按会生出几十条，白停次数虚高。
+    #[test]
+    fn multi_call_presses_each_car_once() {
+        let mut c = small();
+        c.cars = vec![CarSpec::default(); 3];
+        c.call_surface = CallSurface::PerCarPanel;
+        c.strategy = StrategyMix {
+            honest: 0.0,
+            press_both: 0.0,
+            press_up_only: 0.0,
+            multi_call: 1.0,
+        };
+        let mut w = World::new(c);
+        let qi = w.qidx(5);
+        let mut presses = 0;
+        for pid in 0..3 {
+            w.pax[pid].from = 5;
+            w.pax[pid].to = 1;
+            w.pax[pid].t_arrive = 0.0;
+            w.pax[pid].t_exit = 0.0;
+            w.pax[pid].used_stairs = false;
+            w.pax[pid].abandoned = false;
+            w.pax[pid].boarded_car = None;
+            w.pax[pid].strategy = Strategy::MultiCall;
+            w.hall[qi].push(pid);
+            presses += register_calls(&mut w, 5, &[pid]).len();
+        }
+        assert_eq!(presses, 9, "三个人各按三台车");
+        assert_eq!(w.calls.calls.len(), 3, "同一台车重复按不该多出呼叫");
+        assert!(
+            w.calls
+                .calls
+                .iter()
+                .all(|c| c.exclusive && c.owner.is_some() && c.waiting == 3),
+            "三条呼叫各归一台车，等待人数是三个人"
+        );
+    }
+
+    /// 独立面板下老实人只按一台车的按钮。
+    #[test]
+    fn per_car_panel_gives_honest_passengers_one_button() {
+        let mut c = small();
+        c.cars = vec![CarSpec::default(); 2];
+        c.call_surface = CallSurface::PerCarPanel;
+        let mut w = World::new(c);
+        w.pax[0].from = 5;
+        w.pax[0].to = 1;
+        w.pax[0].t_arrive = 0.0;
+        w.pax[0].t_exit = 0.0;
+        w.pax[0].used_stairs = false;
+        w.pax[0].abandoned = false;
+        w.pax[0].boarded_car = None;
+        w.pax[0].strategy = Strategy::Honest;
+        let qi = w.qidx(5);
+        w.hall[qi].push(0);
+        let pre = register_calls(&mut w, 5, &[0]);
+        assert_eq!(pre.len(), 1, "只该按一台车");
+        assert_eq!(w.calls.calls.len(), 1, "共用面板才走槽位去重");
+        assert!(w.calls.calls[0].exclusive);
+        assert!(w.calls.calls[0].owner.is_some());
+    }
+
+    /// 到站消过号的独立按键，同层再按要新建一条，不能复用死掉的那条。
+    #[test]
+    fn cleared_panel_slot_takes_a_new_press() {
+        let mut c = small();
+        c.call_surface = CallSurface::PerCarPanel;
+        let mut w = World::new(c);
+        let first = press_car_panel(&mut w, 0, 5, Dir::Down, 1);
+        clear_car_panel(&mut w, 0, 5, Dir::Down);
+        let second = press_car_panel(&mut w, 0, 5, Dir::Down, 1);
+        assert_ne!(first, second, "消号之后要新建，不能复用死掉的那条");
+        assert_eq!(w.calls.calls.len(), 2);
     }
 
     /// 没人呼叫时，算法也能主动把轿厢挪到想待的那一层。

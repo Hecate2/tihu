@@ -127,11 +127,29 @@
         <input type="checkbox" id="stairs" checked>
         <label for="stairs">有人走楼梯<span class="hint">约 2 到 5% 的人，多住 2 到 6 层</span></label>
       </div>
+      <div class="check">
+        <input type="checkbox" id="percar">
+        <label for="percar">每台梯独立按钮<span class="hint">走廊里一车一按钮，人可指定轿厢</span></label>
+      </div>
       <div class="row">
         <label for="pressb">乱按比例<span class="hint">上下都按，多叫一台梯</span></label>
         <div class="range-wrap">
           <input type="range" id="pressb" min="0" max="0.5" step="0.05" value="0">
           <span class="range-val" id="pressb_v">0%</span>
+        </div>
+      </div>
+      <div class="row">
+        <label for="spam">进梯后乱按内选<span class="hint">按一层自己不去的外呼，车会白停</span></label>
+        <div class="range-wrap">
+          <input type="range" id="spam" min="0" max="0.5" step="0.05" value="0">
+          <span class="range-val" id="spam_v">0%</span>
+        </div>
+      </div>
+      <div class="row">
+        <label for="runner">按了就跑<span class="hint">按下外呼就走，灯亮着没人等</span></label>
+        <div class="range-wrap">
+          <input type="range" id="runner" min="0" max="0.5" step="0.05" value="0">
+          <span class="range-val" id="runner_v">0%</span>
         </div>
       </div>
       <div class="check">
