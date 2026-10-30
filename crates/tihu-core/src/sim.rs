@@ -429,18 +429,8 @@ fn abandon_to_stairs(w: &mut World, pid: usize, metrics: &mut Metrics) {
     // 「已经没人等」这个条件把两条计数路径分开，一条外呼只记一次
     for dir in [Dir::Up, Dir::Down] {
         refresh_waiting(w, level, dir);
-        if waiting_for(w, level, dir) {
-            continue;
-        }
-        let slot = Call::slot_index(level, dir, w.basement);
-        let Some(cid) = w.calls.slots.get(slot).copied().flatten() else {
-            continue;
-        };
-        let stalled = w.calls.get(cid).is_some_and(|c| owned_by_stalled(w, c));
-        if stalled {
-            if let Some(c) = w.calls.get_mut(cid) {
-                c.orphaned = true;
-            }
+        if !waiting_for(w, level, dir) {
+            mark_orphaned_calls(w, level, dir);
         }
     }
     // 弃梯的人确实等过，这段时间要算进等待分布，否则报告里的等待会被
@@ -468,6 +458,25 @@ fn abandon_to_stairs(w: &mut World, pid: usize, metrics: &mut Metrics) {
     pax.final_exit = pax.t_exit;
     metrics.abandoned += 1;
     metrics.by_floor[qi].stair_users += 1;
+}
+
+/// 这一层这个方向已经没人等了。挂在卡死车名下的灯打上标记，
+/// 供 `calls_orphaned` 计数。
+///
+/// 共享灯与独立灯一起扫。独立灯不占槽位，只扫槽位会漏掉它。
+fn mark_orphaned_calls(w: &mut World, level: i16, dir: Dir) {
+    let cars = &w.cars;
+    for c in &mut w.calls.calls {
+        if c.level != level || c.dir != dir || c.orphaned {
+            continue;
+        }
+        let stalled = c
+            .owner
+            .is_some_and(|o| o < cars.len() && cars[o].phase == CarPhase::Stalled);
+        if stalled {
+            c.orphaned = true;
+        }
+    }
 }
 
 /// 按每条外呼的 owner 重建各轿厢的待办列表。
@@ -1092,6 +1101,7 @@ fn plan_leg(w: &mut World, id: CarId, from: i16, target: i16, dir: Dir) {
 /// 这一层有没有一条「这台车方向上、还亮着」的外呼。
 ///
 /// 只按车头方向找。反方向的外呼本来就不归它接，满载开过去不算直驶。
+/// 共享灯在槽位里，独立灯在车名下，两处都要看。
 fn full_passes_call(w: &World, id: CarId, here: i16) -> bool {
     if !w.car_serves(id, here) {
         return false;
@@ -1100,12 +1110,20 @@ fn full_passes_call(w: &World, id: CarId, here: i16) -> bool {
     if !dir.is_moving() {
         return false;
     }
-    w.calls
+    if w.calls
         .slots
         .get(Call::slot_index(here, dir, w.basement))
         .copied()
         .flatten()
         .is_some()
+    {
+        return true;
+    }
+    w.cars[id].assigned.iter().any(|&cid| {
+        w.calls
+            .get(cid)
+            .is_some_and(|c| c.exclusive && c.level == here && c.dir == dir && w.call_is_live(c))
+    })
 }
 
 /// 车上有没有人正好要在这一层下。
@@ -1114,14 +1132,14 @@ fn riders_alight_here(w: &World, id: CarId, level: i16) -> bool {
 }
 
 /// 这台车在这一层有没有活可干：名下有这条外呼，且它还挂在层上。
+///
+/// 共享灯看槽位还指不指它，独立灯看归属还在不在，两种情况由
+/// `call_is_live` 统一判。独立灯不占槽位，不能拿槽位当存活证明。
 fn owns_call_at(w: &World, id: CarId, level: i16) -> bool {
     w.cars[id].assigned.iter().any(|&cid| {
-        w.calls.get(cid).is_some_and(|c| {
-            c.level == level && {
-                let slot = Call::slot_index(c.level, c.dir, w.basement);
-                w.calls.slots.get(slot).copied().flatten() == Some(c.id)
-            }
-        })
+        w.calls
+            .get(cid)
+            .is_some_and(|c| c.level == level && w.call_is_live(c))
     })
 }
 
@@ -3379,6 +3397,125 @@ mod tests {
             Some(0),
             "僵局解除后要有一条车接手这条独立外呼"
         );
+    }
+
+    /// 回归：车停在自己那条独立外呼的楼层上，要为自己的灯开门。
+    ///
+    /// 旧判据拿共享槽位当所有外呼的存活证明。独立灯不占槽位，永远判成没活。
+    /// 这层恰好还有别人的共享灯挂在卡死车名下时，顺手接走那条路也不出手，
+    /// 按了本车面板的人在车门口站着也上不去。
+    #[test]
+    fn idle_car_opens_for_its_own_exclusive_call() {
+        let mut c = small();
+        c.cars = vec![CarSpec::default(); 2];
+        c.call_surface = CallSurface::PerCarPanel;
+        let mut w = World::new(c);
+        // 两位乘客在 5 层下行。一位按了多呼叫面板，一位只按共享按钮
+        for pid in [0usize, 1] {
+            w.pax[pid].from = 5;
+            w.pax[pid].to = 1;
+            w.pax[pid].t_arrive = 0.0;
+            w.pax[pid].t_exit = 0.0;
+            w.pax[pid].used_stairs = false;
+            w.pax[pid].abandoned = false;
+            w.pax[pid].boarded_car = None;
+            w.pax[pid].patience_s = f64::INFINITY;
+        }
+        w.pax[0].strategy = Strategy::MultiCall;
+        w.pax[1].strategy = Strategy::Honest;
+        let qi = w.qidx(5);
+        w.hall[qi].extend([0, 1]);
+        // 共享下行灯挂在卡死的车 1 名下，顺手接走的判据会以为有人管
+        let (shared, _) = w.calls.register(5, Dir::Down, 2, false);
+        w.calls.get_mut(shared).unwrap().owner = Some(1);
+        // 车 0 名下有一条自己的独立下行灯
+        let (mine, _) = w.calls.register(5, Dir::Down, 1, true);
+        w.calls.get_mut(mine).unwrap().owner = Some(0);
+        w.cars[1].phase = CarPhase::Stalled;
+        w.cars[1].stall_since = -100.0;
+        // 车 0 正停在 5 层待命
+        w.cars[0].level = 5.0;
+        w.cars[0].dir = Dir::None;
+        w.cars[0].phase = CarPhase::Idle;
+        sync_assignments(&mut w);
+
+        let mut sv = Scratch::new(w.cars.len(), w.n_levels);
+        let mut heap = std::collections::BinaryHeap::new();
+        let mut seq = 0u64;
+        let mut rng = Streams::new(7);
+        let mut metrics = Metrics::with_floors(w.n_levels);
+        let mut router = DownPeakSweep;
+        let boarding = DefaultBoarding::default();
+        step_car(
+            &mut w,
+            0,
+            &mut router,
+            &boarding,
+            &mut sv,
+            &mut heap,
+            &mut seq,
+            &mut rng,
+            &mut metrics,
+        );
+        assert_eq!(
+            w.cars[0].phase,
+            CarPhase::Boarding,
+            "车 0 该为自己的独立外呼开门"
+        );
+    }
+
+    /// 满载直驶要算上独立面板的灯。旧判据只看共享槽位，独立灯不占槽位，
+    /// 满员车路过自己的独立呼叫时白停一次，还不记直驶。
+    #[test]
+    fn full_car_passing_its_own_exclusive_call_counts_by_load() {
+        let mut c = small();
+        c.cars = vec![CarSpec::default(); 2];
+        let mut w = World::new(c);
+        let (id, _) = w.calls.register(3, Dir::Down, 1, true);
+        w.calls.get_mut(id).unwrap().owner = Some(0);
+        w.cars[0].assigned.push(id);
+        w.cars[0].level = 3.0;
+        w.cars[0].dir = Dir::Down;
+        w.cars[0].phase = CarPhase::Moving;
+        assert!(
+            full_passes_call(&w, 0, 3),
+            "满员路过自己的独立外呼，应当算一次满载直驶"
+        );
+    }
+
+    /// 独立面板的灯挂在卡死车名下，等的人全部弃梯后要打上孤儿标记，
+    /// 与共享灯走同一条统计。旧写法只扫槽位，独立灯永远不进这个计数。
+    #[test]
+    fn abandoned_waiters_mark_exclusive_calls_orphaned() {
+        let mut c = small();
+        c.cars = vec![CarSpec::default(); 2];
+        let mut w = World::new(c);
+        w.pax[0].from = 5;
+        w.pax[0].to = 1;
+        w.pax[0].t_arrive = 0.0;
+        w.pax[0].t_exit = 0.0;
+        w.pax[0].used_stairs = false;
+        w.pax[0].abandoned = false;
+        w.pax[0].boarded_car = None;
+        w.pax[0].patience_s = f64::INFINITY;
+        let qi = w.qidx(5);
+        w.hall[qi].push(0);
+        let (id, _) = w.calls.register(5, Dir::Down, 1, true);
+        w.calls.get_mut(id).unwrap().owner = Some(0);
+        w.cars[0].phase = CarPhase::Stalled;
+        w.cars[0].stall_since = -100.0;
+        sync_assignments(&mut w);
+
+        w.now = 100.0;
+        let mut m = Metrics::with_floors(w.n_levels);
+        abandon_to_stairs(&mut w, 0, &mut m);
+        assert!(w.pax[0].abandoned, "前提：这位乘客应当弃梯");
+        assert!(
+            w.calls.get(id).unwrap().orphaned,
+            "独立灯挂在卡死车名下，人全走了要打孤儿标记"
+        );
+        let m = collect(&w, 0, 0.0, m);
+        assert_eq!(m.calls_orphaned, 1, "全弃梯后要记一次没人接");
     }
 
     /// 灭灯的外呼不进算法视图。编号永不复用，旧记录留在表里，
