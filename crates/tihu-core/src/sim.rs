@@ -165,8 +165,7 @@ pub fn run<R: Router, A: Assigner, B: Boarding>(
                 if !w.in_bounds(level) {
                     continue;
                 }
-                let qi = w.qidx(level);
-                w.hall[qi].push(pid);
+                enter_hall(&mut w, pid, level);
                 // 有车正开着门停在这层时，新到的人可以直接上。策略要求延长
                 // 开门时，这段保持开启的时长就是留给这些人的
                 if board_stopped(&mut w, pid, boarding, &mut rng) {
@@ -458,6 +457,17 @@ fn abandon_to_stairs(w: &mut World, pid: usize, metrics: &mut Metrics) {
     pax.final_exit = pax.t_exit;
     metrics.abandoned += 1;
     metrics.by_floor[qi].stair_users += 1;
+}
+
+/// 乘客进入 `level` 层的电梯厅。已经在里面的人不重复加。
+///
+/// 僵局重排会先把人放回厅里，再排一次重新进场事件。进场入口若不判重，
+/// 同一个人会在名单里占两个位置，层上的等待人数被数大一倍。
+fn enter_hall(w: &mut World, pid: usize, level: i16) {
+    let qi = w.qidx(level);
+    if !w.hall[qi].contains(&pid) {
+        w.hall[qi].push(pid);
+    }
 }
 
 /// 这一层这个方向已经没人等了。挂在卡死车名下的灯打上标记，
@@ -1636,7 +1646,9 @@ fn stall_tick(
 
     let now_under = w.cars[id].load_kg <= trigger;
     let timed_out = elapsed > ov.stall_timeout_s;
-    if now_under || (timed_out && w.cars[id].occupants.len() > 1) {
+    // 超时一律恢复。旧判据要求车里多于一个人，可一个人就压过报警线时
+    // 没人可劝退，那条僵局永远解不开，轿厢会一直趴到仿真结束
+    if now_under || timed_out {
         // 恢复了。强制退出时把最近上车的人请下去
         if !now_under {
             if let Some(&pid) = w.cars[id].occupants.last() {
@@ -1695,10 +1707,7 @@ fn requeue_after_stall(
     w.pax[pid].boarded_car = None;
     w.pax[pid].requeued_after_stall = true;
     let patience = w.pax[pid].patience_s;
-    let qi = w.qidx(floor);
-    if !w.hall[qi].contains(&pid) {
-        w.hall[qi].push(pid);
-    }
+    enter_hall(w, pid, floor);
     // 重新进场，外呼会在那一刻重新登记
     heap.push(Ev {
         at: w.now,
@@ -2970,6 +2979,86 @@ mod tests {
         let r = run(c, &mut router, &mut assigner, &boarding);
         assert_eq!(r.metrics.pax_total, 0, "这一份配置不该有乘客");
         assert_eq!(r.world.cars[0].level, 5.0, "轿厢应当自己挪到第五层待命");
+    }
+
+    /// 红线 6：一个人就压过报警线时，没人可劝退，超时也要强制请他下车。
+    ///
+    /// 旧判据要求车里多于一个人，单人僵局永远解不开，轿厢趴到仿真结束，
+    /// 层上的人也跟着枯等。
+    #[test]
+    fn lone_overweight_rider_is_evicted_on_timeout() {
+        let mut c = small();
+        c.overload.enabled = true;
+        c.overload.trigger_ratio = 0.01;
+        c.overload.q_last = 0.0;
+        c.overload.q_other = 0.0;
+        c.overload.stall_timeout_s = 10.0;
+        let mut w = World::new(c);
+        let pid = 0;
+        let lv = w.pax[pid].from;
+        let trigger = w.cfg.overload.trigger_ratio * w.cfg.cars[0].rated_load_kg as f64;
+        w.pax[pid].weight = trigger + 10.0;
+        w.cars[0].level = lv as f32;
+        w.cars[0].occupants.push(pid);
+        w.cars[0].load_kg = w.pax[pid].weight;
+        w.pax[pid].boarded_car = Some(0);
+        w.pax[pid].t_board = 1.0;
+        assert!(
+            w.cars[0].load_kg > trigger,
+            "前提：一个人就压过报警线，车里没人可劝退"
+        );
+        w.cars[0].phase = CarPhase::Stalled;
+        w.cars[0].stall_since = 0.0;
+        w.now = 20.0;
+
+        let mut rng = Streams::new(9);
+        let mut heap = std::collections::BinaryHeap::new();
+        let mut seq = 0u64;
+        let out = stall_tick(&mut w, 0, &mut rng, &mut heap, &mut seq);
+        assert!(out.resumed, "单人超时也要恢复，不能无限僵住");
+        assert_eq!(w.cars[0].phase, CarPhase::Idle);
+        assert!(w.cars[0].occupants.is_empty(), "超时要把人请下车");
+        assert!(
+            w.hall[w.qidx(lv)].contains(&pid),
+            "请下车的人要回到出发层的电梯厅"
+        );
+    }
+
+    /// 僵局重排先放回电梯厅，再排一次重新进场。进场这一步不能把
+    /// 同一个人再加一遍，否则层上的等待人数会被数大一倍。
+    #[test]
+    fn requeued_passenger_enters_the_hall_once() {
+        let mut w = World::new(small());
+        let pid = 0;
+        let from = w.pax[pid].from;
+        w.cars[0].level = from as f32;
+        w.cars[0].occupants.push(pid);
+        w.cars[0].load_kg = w.pax[pid].weight;
+        w.pax[pid].boarded_car = Some(0);
+        w.pax[pid].t_board = 100.0;
+        let qi = w.qidx(from);
+        w.hall[qi].retain(|&p| p != pid);
+
+        let mut heap = std::collections::BinaryHeap::new();
+        let mut seq = 0u64;
+        requeue_after_stall(&mut w, 0, pid, &mut heap, &mut seq);
+        assert_eq!(
+            w.hall[qi].iter().filter(|&&p| p == pid).count(),
+            1,
+            "请下车后回到电梯厅一次"
+        );
+        // 重排的进场事件到点，再走一次进场入口，名单里不能多出一个人
+        enter_hall(&mut w, pid, from);
+        assert_eq!(
+            w.hall[qi].iter().filter(|&&p| p == pid).count(),
+            1,
+            "同一个人不能在电梯厅占两个位置"
+        );
+        assert!(
+            heap.iter()
+                .any(|e| matches!(e.kind, Kind::Arrive(p) if p == pid)),
+            "重排要为这个人排一次进场事件"
+        );
     }
 
     /// 被超载僵局请下车的乘客是重新排队，不是「已经到达」。
