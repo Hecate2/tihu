@@ -111,7 +111,7 @@ function profileFor(v) {
 // 改了要重算的控件。这份清单同时用来挂监听，界面上的输入框与这里的名字
 // 一一对应，加控件只改这一处。
 const LIVE_IDS = [
-  "res_floors", "units", "ppu", "fh", "basement", "gfr",
+  "res_floors", "units", "ppu", "area", "fh", "basement", "gfr",
   "ncars", "load", "speed", "stops",
   "pattern", "dep", "window", "ret",
   "stairs", "pressb", "overload",
@@ -180,6 +180,9 @@ function applyUi(cfg) {
   cfg.building.top_level = top;
   cfg.building.floor_height = num(ui.fh);
   cfg.building.persons_per_unit = num(ui.ppu);
+  // 每层建筑面积可不填。空着就不做密度校验，填了内核才按最小套型与
+  // 人均面积反推这层塞不塞得下
+  cfg.building.floor_area_m2 = ui.area.value.trim() === "" ? null : num(ui.area);
   cfg.building.basement_levels = basement;
   cfg.building.ground_floor_residential = gfr;
   const floors = new Array(top);
@@ -272,6 +275,7 @@ function loadIntoUi(cfg) {
   // 每层户数的代表值取第一格非零的。一层是大堂时第一格是 0，跳过它。
   ui.units.value = cfg.building.units_per_floor.find((x) => x > 0) || 4;
   ui.ppu.value = cfg.building.persons_per_unit;
+  ui.area.value = cfg.building.floor_area_m2 == null ? "" : cfg.building.floor_area_m2;
   ui.fh.value = cfg.building.floor_height;
   ui.basement.value = cfg.building.basement_levels || 0;
   ui.gfr.checked = !!cfg.building.ground_floor_residential;

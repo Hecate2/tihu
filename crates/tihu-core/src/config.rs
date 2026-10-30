@@ -1059,17 +1059,43 @@ impl Config {
             ));
         }
 
-        // 红线 5：层数、户数、户均人数不是三个自由变量
+        // 红线 5：层数、户数、户均人数不是三个自由变量。
+        // 三个面积参数是这条约束的分母。0 或负数会让反推失去意义，NaN 与任何
+        // 数比较都是假，普通大小判据抓不住它，所以统一写成「不大于 0」。
+        let unit_bound_ok = b.min_unit_area_m2 > 0.0;
+        if !unit_bound_ok {
+            v.issues.push(Issue::error(
+                "density_bounds",
+                format!("最小套型面积要大于 0 平方米，当前 {}", b.min_unit_area_m2),
+            ));
+        }
+        let person_bound_ok = b.min_area_per_person_m2 > 0.0;
+        if !person_bound_ok {
+            v.issues.push(Issue::error(
+                "density_bounds",
+                format!(
+                    "人均最低面积要大于 0 平方米，当前 {}",
+                    b.min_area_per_person_m2
+                ),
+            ));
+        }
         if let Some(area) = b.floor_area_m2 {
-            let max_units = (area / b.min_unit_area_m2).floor() as i32;
-            let max_persons = (area / b.min_area_per_person_m2).floor() as i32;
-            for level in 1..=b.top_level {
-                // 用 units_at 而不是原始表：顶层跃层要减半，关掉主入口层住户
-                // 要清零。密度检查得跟真正住进去的人数走
-                let units = b.units_at(level) as i32;
-                let persons = units as f32 * b.persons_per_unit;
-                if units > max_units {
-                    v.issues.push(Issue::error_at(
+            let area_ok = area > 0.0;
+            if !area_ok {
+                v.issues.push(Issue::error(
+                    "density_bounds",
+                    format!("每层建筑面积要大于 0 平方米，当前 {area}"),
+                ));
+            } else if unit_bound_ok && person_bound_ok {
+                let max_units = (area / b.min_unit_area_m2).floor() as i32;
+                let max_persons = (area / b.min_area_per_person_m2).floor() as i32;
+                for level in 1..=b.top_level {
+                    // 用 units_at 而不是原始表：顶层跃层要减半，关掉主入口层住户
+                    // 要清零。密度检查得跟真正住进去的人数走
+                    let units = b.units_at(level) as i32;
+                    let persons = units as f32 * b.persons_per_unit;
+                    if units > max_units {
+                        v.issues.push(Issue::error_at(
                         "density_units",
                         format!(
                             "第 {} 层设了 {} 户。按最小套型 {:.0} m² 反推，这层至少要有 {:.0} m² 的套内面积才塞得下",
@@ -1080,11 +1106,11 @@ impl Config {
                         ),
                         level,
                     ));
-                }
-                // 人均面积越接近下限越可疑。落在下限的一点五倍以内就提醒。
-                let per_person = area / persons.max(1.0);
-                if persons as i32 > max_persons {
-                    v.issues.push(Issue::error_at(
+                    }
+                    // 人均面积越接近下限越可疑。落在下限的一点五倍以内就提醒。
+                    let per_person = area / persons.max(1.0);
+                    if persons as i32 > max_persons {
+                        v.issues.push(Issue::error_at(
                         "density_persons",
                         format!(
                             "第 {} 层按每户 {:.1} 人算是 {:.0} 人。按人均 {:.0} m² 反推，这层至少要有 {:.0} m² 才合规",
@@ -1096,16 +1122,17 @@ impl Config {
                         ),
                         level,
                     ));
-                } else if per_person < b.min_area_per_person_m2 * 1.5 {
-                    v.issues.push(Issue {
-                        severity: Severity::Warn,
-                        code: "density_tight",
-                        message: format!(
+                    } else if per_person < b.min_area_per_person_m2 * 1.5 {
+                        v.issues.push(Issue {
+                            severity: Severity::Warn,
+                            code: "density_tight",
+                            message: format!(
                             "第 {} 层人均 {:.1} m²，已经逼近 {:.0} m² 的下限，实际楼盘不太可能这样",
                             level, per_person, b.min_area_per_person_m2
                         ),
-                        level: Some(level),
-                    });
+                            level: Some(level),
+                        });
+                    }
                 }
             }
         }
@@ -1129,18 +1156,21 @@ impl Config {
             v.issues
                 .push(Issue::error("horizon", "仿真时长要大于 0".into()));
         }
-        // 种子范围的宽度。结束值不大于根种子时按单次跑，不报错
+        // 种子范围的宽度。结束值不大于根种子时按单次跑，不报错。
+        // 宽度用 u128 算。seed=0 到 u64::MAX 这种输入在 u64 上加一会溢出，
+        // debug 直接 panic，release 回绕之后校验就放过去了
         if let Some(to) = self.sim.seed_to {
-            if to > self.sim.seed && to - self.sim.seed + 1 > MAX_SEEDS {
-                v.issues.push(Issue::error(
-                    "seed_range",
-                    format!(
-                        "种子范围最多跑 {MAX_SEEDS} 个，当前 {} 到 {} 一共 {} 个",
-                        self.sim.seed,
-                        to,
-                        to - self.sim.seed + 1
-                    ),
-                ));
+            if to > self.sim.seed {
+                let count = u128::from(to) - u128::from(self.sim.seed) + 1;
+                if count > u128::from(MAX_SEEDS) {
+                    v.issues.push(Issue::error(
+                        "seed_range",
+                        format!(
+                            "种子范围最多跑 {MAX_SEEDS} 个，当前 {} 到 {} 一共 {} 个",
+                            self.sim.seed, to, count
+                        ),
+                    ));
+                }
             }
         }
         if self.boarding.crush_factor < 1.0 {
@@ -1442,6 +1472,47 @@ mod tests {
         let v = c.validate();
         assert!(v.is_ok(), "逼近下限不该是硬错误");
         assert!(v.warnings().count() > 0, "应当给出黄条");
+    }
+
+    #[test]
+    fn density_bounds_must_be_positive() {
+        let mut c = Config::default();
+
+        // 最小套型面积为 0，反推出的户数上限要么除零要么无穷大
+        c.building.min_unit_area_m2 = 0.0;
+        let v = c.validate();
+        assert!(!v.is_ok(), "最小套型面积为 0 应当被拦下");
+        assert!(
+            v.errors().any(|i| i.code == "density_bounds"),
+            "报错要指出面积下限必须是正数"
+        );
+
+        // NaN 与 0 比较一律为假，普通大小判据抓不住它
+        c.building.min_unit_area_m2 = 45.0;
+        c.building.min_area_per_person_m2 = f32::NAN;
+        let v = c.validate();
+        assert!(!v.is_ok(), "人均下限是 NaN 应当被拦下");
+        assert!(v.errors().any(|i| i.code == "density_bounds"));
+
+        // 楼板面积自己也得是正数，填 0 的人均面积反推没有意义
+        c.building.min_area_per_person_m2 = 20.0;
+        c.building.floor_area_m2 = Some(0.0);
+        let v = c.validate();
+        assert!(!v.is_ok(), "每层建筑面积为 0 应当被拦下");
+        assert!(v.errors().any(|i| i.code == "density_bounds"));
+    }
+
+    #[test]
+    fn seed_range_does_not_overflow() {
+        let mut c = Config::default();
+        c.sim.seed = 0;
+        c.sim.seed_to = Some(u64::MAX);
+        let v = c.validate();
+        assert!(!v.is_ok(), "整个 u64 空间都当种子跑不能放行");
+        assert!(
+            v.errors().any(|i| i.code == "seed_range"),
+            "应当报 seed_range"
+        );
     }
 
     #[test]
