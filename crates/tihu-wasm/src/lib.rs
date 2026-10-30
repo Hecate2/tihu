@@ -190,6 +190,8 @@ struct SimReport {
     stair_users: usize,
     stair_share: f64,
     abandoned: usize,
+    /// 按了外呼就走、没坐梯也没走楼梯的人数
+    pax_press_and_run: usize,
     /// 全楼住户乘出行率估出来的行程段数，用来判断客流有没有跑完
     trips_expected: usize,
 
@@ -287,6 +289,7 @@ impl SimReport {
             stair_users: m.stair_users,
             stair_share: r3(m.stair_share),
             abandoned: m.abandoned,
+            pax_press_and_run: m.pax_press_and_run,
             trips_expected: run.cfg().expected_trips(),
 
             n_cars: m.n_cars,
@@ -372,6 +375,7 @@ impl SimReport {
             stair_users: g.stair_users.round() as usize,
             stair_share: r3(g.stair_share),
             abandoned: g.abandoned.round() as usize,
+            pax_press_and_run: g.pax_press_and_run.round() as usize,
             trips_expected: g.trips_expected.round() as usize,
 
             n_cars: cfg.cars.len(),

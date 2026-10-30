@@ -171,11 +171,13 @@ pub enum Stream {
     Stall = 8,
     /// 每位乘客愿意等多久才改走楼梯
     Patience = 9,
+    /// 谁乱按内选、谁按了就跑，以及按哪几层
+    Malice = 10,
 }
 
 impl Stream {
     /// 全部流，用于自检。
-    pub const ALL: [Stream; 10] = [
+    pub const ALL: [Stream; 11] = [
         Stream::Arrival,
         Stream::Destination,
         Stream::Tolerance,
@@ -186,6 +188,7 @@ impl Stream {
         Stream::Demand,
         Stream::Stall,
         Stream::Patience,
+        Stream::Malice,
     ];
 }
 

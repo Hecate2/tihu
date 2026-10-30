@@ -731,6 +731,7 @@ function render(s) {
     ["未完成行程", s.pax_unfinished + " 人"],
     ["走楼梯（含半路改走）", s.stair_users + "（" + fmt(s.stair_share * 100, 1) + "%）"],
     ["其中半路改走楼梯", s.abandoned + " 人"],
+    ["按了外呼就走", s.pax_press_and_run + " 人"],
     ["被跳过：位子不够", noSpace + " 次"],
     ["被跳过：人不愿挤", declined + " 次"],
     ["白停一次", s.ghost_stops + " 次"],

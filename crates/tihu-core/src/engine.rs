@@ -62,6 +62,12 @@ pub struct Pax {
     pub used_stairs: bool,
     /// 等得不耐烦改走楼梯。与 `used_stairs` 分开统计
     pub abandoned: bool,
+    /// 上车后会不会按一个假内选
+    pub inside_spam: bool,
+    /// 按下外呼就走，灯亮着但人不坐梯
+    pub press_and_run: bool,
+    /// 已经离开，既没坐梯也没走楼梯。按了就跑的人走这条路
+    pub gone: bool,
     /// 反向叫梯者的转向层
     pub reversal_floor: Option<i16>,
     /// 是否因为超载僵局退出过轿厢
@@ -102,7 +108,11 @@ impl Pax {
 
     /// 这位乘客此刻还在电梯厅等吗。
     pub fn waiting(&self) -> bool {
-        self.t_exit <= 0.0 && !self.used_stairs && !self.abandoned && self.boarded_car.is_none()
+        self.t_exit <= 0.0
+            && !self.used_stairs
+            && !self.abandoned
+            && !self.gone
+            && self.boarded_car.is_none()
     }
 
     /// 这位乘客在 `level` 层会不会按 `dir` 这个方向的按钮。
@@ -199,6 +209,9 @@ pub struct Car {
     pub leg_dist: f64,
     /// 这条腿上已经预定要停的楼层。由外呼指派与制动可行性共同决定
     pub stops_planned: Vec<(i16, Dir)>,
+    /// 内选面板上亮着、但车里没有对应乘客的层。乱按的人按下的就是这些。
+    /// 按一次亮到车停那一层为止，中途乘客下车也不会灭
+    pub extra_calls: Vec<i16>,
     /// 刚在哪一层收过尾。停靠完还停在这一层时，不许原地再开一次门，
     /// 否则车满不了又走不掉，会在同一层反复空停靠卡死（分区梯的死锁就出在这）
     pub settled_level: Option<i16>,
@@ -503,6 +516,7 @@ impl World {
                 leg_start: 0.0,
                 leg_dist: 0.0,
                 stops_planned: Vec::with_capacity(n_levels * 2),
+                extra_calls: Vec::with_capacity(4),
                 settled_level: None,
                 ghost_stops: 0,
                 partial_departures: 0,
@@ -672,6 +686,19 @@ impl World {
                 stairs.probability_up(span, est)
             };
             let use_stairs = stairs.enabled && rng.chance(Stream::Demand, walk_p);
+            // 恶意行为是两条独立的抽签，与按键策略互不排斥：同一个人可以
+            // 既双向外呼又乱按内选。用独立的流，不动已有客流序列
+            let malice = &self.cfg.malice;
+            let inside_spam = rng.chance(Stream::Malice, malice.inside_spam_share);
+            let press_and_run =
+                !use_stairs && rng.chance(Stream::Malice, malice.press_and_run_share);
+            // 按了就跑的人只按一下，过几秒就走。给一个短耐心窗口，
+            // 弃梯事件才会排上；走的人不坐梯也不算走楼梯
+            let patience = if press_and_run {
+                crate::config::PRESS_AND_RUN_DELAY_S
+            } else {
+                patience
+            };
             let mut hops = [Hop { from, to }, Hop { from: to, to: from }];
             let n_hops = if with_return { 2 } else { 1 };
             if !with_return {
@@ -698,6 +725,9 @@ impl World {
                 no_space_total: 0,
                 used_stairs: use_stairs,
                 abandoned: false,
+                inside_spam,
+                press_and_run,
+                gone: false,
                 reversal_floor: None,
                 requeued_after_stall: false,
                 abandon_at: f64::INFINITY,
@@ -829,11 +859,13 @@ impl World {
     pub(crate) fn fill_run_view<'a>(&'a self, sv: &'a mut Scratch, id: CarId) -> RunView<'a> {
         let spec = &self.cfg.cars[id];
         let car = &self.cars[id];
-        // 内选楼层由在梯乘客的目的层现算。早先有一个 Car::car_calls 字段，
-        // 但从来没人往里写，于是 will_alight 对算法永远回答 false
+        // 内选楼层由在梯乘客的目的层现算，再加上乱按亮着的假层。
+        // 早先有一个 Car::car_calls 字段，但从来没人往里写，
+        // 于是 will_alight 对算法永远回答 false
         sv.car_calls.clear();
         sv.car_calls
             .extend(car.occupants.iter().map(|&p| self.pax[p].to));
+        sv.car_calls.extend(car.extra_calls.iter().copied());
         sv.car_calls.sort_unstable();
         sv.mine.clear();
         for cid in &car.assigned {

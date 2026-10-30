@@ -226,6 +226,8 @@ pub struct Metrics {
     pub stair_users: usize,
     /// 等得不耐烦中途改走楼梯的人数
     pub abandoned: usize,
+    /// 按了外呼就走、没坐梯也没走楼梯的人数
+    pub pax_press_and_run: usize,
 
     /// 轿厢数
     pub n_cars: usize,

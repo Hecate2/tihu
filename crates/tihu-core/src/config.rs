@@ -546,6 +546,38 @@ impl StrategyMix {
     }
 }
 
+/// 恶意使用。
+///
+/// 真实电梯厅里两种行为都很常见，也是调度算法最怕的两类输入：进了轿厢
+/// 乱按一层自己不去的内选，到了厅里按一下就走、灯还亮着。两种都按乘客
+/// 比例抽签，默认全为零，不影响任何已有配置。
+#[derive(Debug, Clone, Copy)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(default))]
+pub struct Malice {
+    /// 上车后按一下假内选的乘客比例。按的是这台车真停的层，只是不是
+    /// 他自己要去的层
+    pub inside_spam_share: f64,
+    /// 每位乱按者按几个假层。按到重复的层只算一次
+    pub inside_spam_floors: u32,
+    /// 按了就跑的乘客比例：在厅里按下外呼，过几秒人走了，灯还亮着
+    pub press_and_run_share: f64,
+}
+
+impl Default for Malice {
+    fn default() -> Self {
+        Self {
+            inside_spam_share: 0.0,
+            inside_spam_floors: 1,
+            press_and_run_share: 0.0,
+        }
+    }
+}
+
+/// 按了就跑的人在厅里停留几秒再走。太短看不出「灯亮着没人等」，
+/// 太长就不像跑了。按 MODEL 4.5 的取值。
+pub const PRESS_AND_RUN_DELAY_S: f64 = 3.0;
+
 /// 走楼梯的配置。
 ///
 /// 走楼梯是一个**行为**模型，不是一个物理模型。住户不会做「电梯全程耗时与
@@ -829,6 +861,8 @@ pub struct Config {
     /// 乘客体重分布
     pub weight: WeightMix,
     pub strategy: StrategyMix,
+    /// 恶意使用：乱按内选与按了就跑
+    pub malice: Malice,
     pub call_surface: CallSurface,
     pub overload: Overload,
     pub sim: Sim,
@@ -844,6 +878,7 @@ impl Default for Config {
             boarding: Boarding::default(),
             weight: WeightMix::default(),
             strategy: StrategyMix::default(),
+            malice: Malice::default(),
             call_surface: CallSurface::GroupSingle,
             overload: Overload::default(),
             sim: Sim::default(),
@@ -1209,6 +1244,30 @@ impl Config {
             v.issues.push(Issue::error(
                 "strategy_share",
                 "策略占比之和要大于 0".into(),
+            ));
+        }
+        // 恶意行为是两个独立的乘客比例，不参与策略占比的归一化
+        let m = &self.malice;
+        for (what, share) in [
+            ("乱按内选", m.inside_spam_share),
+            ("按了就跑", m.press_and_run_share),
+        ] {
+            if !(0.0..=1.0).contains(&share) {
+                v.issues.push(Issue::error(
+                    "malice_share",
+                    format!("{what}的乘客比例应在 0 到 1 之间，当前 {share:.2}"),
+                ));
+            }
+        }
+        // 0 个假层等于没按。上限按整栋楼的层数算，超过没有意义
+        let levels = (b.highest_level() - b.lowest_level() + 1).max(1) as u32;
+        if m.inside_spam_floors < 1 || m.inside_spam_floors > levels {
+            v.issues.push(Issue::error(
+                "malice_floors",
+                format!(
+                    "乱按的层数应在 1 到 {levels} 之间，当前 {}",
+                    m.inside_spam_floors
+                ),
             ));
         }
         // 每一层都要有至少一台轿厢愿意停，否则那一层的人永远等不到车。
@@ -1668,6 +1727,19 @@ mod tests {
         assert!(v.errors().any(|i| i.code == "basement_levels"));
     }
 
+    /// 恶意行为是两条独立的乘客比例，越界与「按零层」都说不通。
+    #[test]
+    fn malice_shares_and_floors_are_checked() {
+        let mut c = Config::default();
+        c.malice.inside_spam_share = 1.5;
+        c.malice.press_and_run_share = -0.1;
+        c.malice.inside_spam_floors = 0;
+        let v = c.validate();
+        assert!(!v.is_ok());
+        assert!(v.errors().any(|i| i.code == "malice_share"));
+        assert!(v.errors().any(|i| i.code == "malice_floors"));
+    }
+
     /// 体重分量的份额是抽样比例，表空了就抽不出这栋楼的人。
     #[test]
     fn empty_weight_peaks_are_rejected() {
@@ -1905,6 +1977,11 @@ mod tests {
             press_both: 0.3,
             press_up_only: 0.1,
             multi_call: 0.1,
+        };
+        c.malice = Malice {
+            inside_spam_share: 0.2,
+            inside_spam_floors: 3,
+            press_and_run_share: 0.1,
         };
 
         let a = serde_json::to_string(&c).unwrap();

@@ -10,7 +10,7 @@
 //! 都不会「路过该停的层」，也不会「停在没活可干的层」。
 
 use crate::builtin::{DefaultBoarding, DownPeakSweep};
-use crate::config::{CallSurface, Config, Strategy};
+use crate::config::{CallSurface, Config, Strategy, LOBBY};
 use crate::engine::{Call, CarPhase, Scratch, World};
 use crate::metrics::Metrics;
 use crate::motion::{decel_distance, state_at, time_at_distance, Dir};
@@ -382,14 +382,6 @@ fn waiting_rescue(w: &World, id: CarId, here: i16) -> bool {
     false
 }
 
-/// 这位乘客此刻是不是还在 `level` 层的电梯厅里等。
-fn in_hall(w: &World, pid: usize, level: i16) -> bool {
-    if level < -w.basement || level > w.top {
-        return false;
-    }
-    w.hall[w.qidx(level)].contains(&pid)
-}
-
 /// 等得不耐烦，改走楼梯。这一位乘客从电梯厅里退场，计入另一类统计。
 fn abandon_to_stairs(w: &mut World, pid: usize, metrics: &mut Metrics) {
     if !w.pax[pid].waiting() {
@@ -407,6 +399,17 @@ fn abandon_to_stairs(w: &mut World, pid: usize, metrics: &mut Metrics) {
     if !w.in_bounds(level) {
         return;
     }
+    // 按了就跑：只按了一下，人走了，灯还亮着。他不坐梯也不算走楼梯，
+    // 等在厅里那几秒更不是「等不到车」，不进等待分布
+    if w.pax[pid].press_and_run {
+        leave_hall(w, pid, level);
+        let pax = &mut w.pax[pid];
+        pax.gone = true;
+        pax.t_exit = w.now;
+        pax.final_exit = w.now;
+        metrics.pax_press_and_run += 1;
+        return;
+    }
     let stairs = w.cfg.stairs.clone();
     let floors = (to - level).abs();
     // 可行性上限：没人会爬二十层楼梯去上班。超过这个层数就不许弃梯，
@@ -422,18 +425,7 @@ fn abandon_to_stairs(w: &mut World, pid: usize, metrics: &mut Metrics) {
     let t_arrive = w.pax[pid].t_arrive;
     let waited = (w.now - t_arrive).max(0.0);
     let qi = w.qidx(level);
-    if in_hall(w, pid, level) {
-        w.hall[qi].retain(|&p| p != pid);
-    }
-    // 少了一个人等，两个方向都要处理：外呼上记的人数跟着降，
-    // 要是这条外呼死在一台卡住的车上，顺手打上标记。
-    // 「已经没人等」这个条件把两条计数路径分开，一条外呼只记一次
-    for dir in [Dir::Up, Dir::Down] {
-        refresh_waiting(w, level, dir);
-        if !waiting_for(w, level, dir) {
-            mark_orphaned_calls(w, level, dir);
-        }
-    }
+    leave_hall(w, pid, level);
     // 弃梯的人确实等过，这段时间要算进等待分布，否则报告里的等待会被
     // 系统性低估：等最久的那批人正好是弃梯走掉的那批
     metrics.wait.add(waited);
@@ -459,6 +451,24 @@ fn abandon_to_stairs(w: &mut World, pid: usize, metrics: &mut Metrics) {
     pax.final_exit = pax.t_exit;
     metrics.abandoned += 1;
     metrics.by_floor[qi].stair_users += 1;
+}
+
+/// 从电梯厅退场：名单、外呼人数、孤儿标记一起收。
+///
+/// 少了一个人等，两个方向都要处理：外呼上记的人数跟着降，要是这条外呼
+/// 死在一台卡住的车上，顺手打上标记。「已经没人等」这个条件把两条计数
+/// 路径分开，一条外呼只记一次。
+fn leave_hall(w: &mut World, pid: usize, level: i16) {
+    let qi = w.qidx(level);
+    if w.hall[qi].contains(&pid) {
+        w.hall[qi].retain(|&p| p != pid);
+    }
+    for dir in [Dir::Up, Dir::Down] {
+        refresh_waiting(w, level, dir);
+        if !waiting_for(w, level, dir) {
+            mark_orphaned_calls(w, level, dir);
+        }
+    }
 }
 
 /// 乘客进入 `level` 层的电梯厅。已经在里面的人不重复加。
@@ -1021,9 +1031,25 @@ fn needs_stop(w: &World, id: CarId, here: i16) -> bool {
 }
 
 /// 决定下一程。车上有乘客时先送客，这是压过一切优化的义务。
+///
+/// 车空了以后才去响应亮着的假内选。乱按的人最多让空车多跑几趟，
+/// 不能把别人的目的地一直往后推。
 fn choose_leg<R: Router>(w: &mut World, id: CarId, router: &R, sv: &mut Scratch) -> Leg {
     let here = w.cars[id].level.round() as i16;
     if let Some(t) = nearest_rider_dest(w, id, here) {
+        if t > here {
+            return Leg::Up(t);
+        } else if t < here {
+            return Leg::Down(t);
+        }
+    }
+    // 空车：面板上还亮着的假内选
+    if let Some(t) = w.cars[id]
+        .extra_calls
+        .iter()
+        .copied()
+        .min_by_key(|&t| (t - here).abs())
+    {
         if t > here {
             return Leg::Up(t);
         } else if t < here {
@@ -1095,6 +1121,15 @@ fn plan_leg(w: &mut World, id: CarId, from: i16, target: i16, dir: Dir) {
     for k in 0..w.cars[id].occupants.len() {
         let pid = w.cars[id].occupants[k];
         let t = w.pax[pid].to;
+        let pair = (t, dir);
+        if t >= lo && t <= hi && t != from && !w.cars[id].stops_planned.contains(&pair) {
+            w.cars[id].stops_planned.push(pair);
+        }
+    }
+    // 乱按亮着的假内选也在这条腿上停一次。它不属于任何人，
+    // 停到这里就是一次白停，计入幽灵停站
+    for k in 0..w.cars[id].extra_calls.len() {
+        let t = w.cars[id].extra_calls[k];
         let pair = (t, dir);
         if t >= lo && t <= hi && t != from && !w.cars[id].stops_planned.contains(&pair) {
             w.cars[id].stops_planned.push(pair);
@@ -1248,6 +1283,8 @@ fn begin_stop<B: Boarding>(
 fn settle_stop(w: &mut World, id: CarId) {
     let lv = w.cars[id].level.round() as i16;
     w.cars[id].stops_planned.retain(|&(l, _)| l != lv);
+    // 停到这一层，面板上这一层的内选随之熄灭。乱按的假内选也走这条路
+    w.cars[id].extra_calls.retain(|&l| l != lv);
     w.cars[id].stop_started = 0.0;
     w.cars[id].holding = false;
     // 记下刚收尾的层，Idle 里据此压制原地重开门
@@ -1465,6 +1502,31 @@ fn board_and_alight<B: Boarding>(
     w.alight_buf = exited;
 }
 
+/// 上车后按几个假内选。
+///
+/// 只能按这台车真停的层，面板上本来就没有别的按钮。避开自己要去的那层
+/// 与当前层，否则按下去等于没按。拒绝采样，最多试十来次，找不到就少按一个。
+fn press_fake_calls(w: &mut World, id: CarId, pid: usize, rng: &mut Streams) {
+    let times = w.cfg.malice.inside_spam_floors as usize;
+    let own = w.pax[pid].to;
+    let here = w.cars[id].level.round() as i16;
+    // 层号 0 不存在，无地下层时最低层就是主入口层
+    let lo = if w.basement > 0 { -w.basement } else { LOBBY };
+    let span = (w.top - lo + 1).max(1) as u32;
+    for _ in 0..times {
+        for _ in 0..12 {
+            let lv = lo + rng.below(Stream::Malice, span) as i16;
+            if lv == 0 || lv == own || lv == here || !w.car_serves(id, lv) {
+                continue;
+            }
+            if !w.cars[id].extra_calls.contains(&lv) {
+                w.cars[id].extra_calls.push(lv);
+            }
+            break;
+        }
+    }
+}
+
 /// 考察队列里第 `pid` 位能否上车。
 fn try_board_one<B: Boarding>(
     w: &mut World,
@@ -1547,6 +1609,11 @@ fn try_board_one<B: Boarding>(
             w.cars[id].load_kg += w.pax[pid].weight;
             w.pax[pid].boarded_car = Some(id);
             w.pax[pid].t_board = now;
+            // 乱按内选：在这台车真停的层里挑一层按下去。灯会一直亮到
+            // 车停在那里，中途这一位下车也不灭
+            if w.pax[pid].inside_spam {
+                press_fake_calls(w, id, pid, rng);
+            }
             // 反向叫梯的人登记转向层，一路坐到折返点再下来
             if matches!(
                 w.pax[pid].strategy,
@@ -1735,6 +1802,11 @@ fn requeue_after_stall(
 fn collect(w: &World, mut stalls: usize, mut stall_seconds: f64, mut m: Metrics) -> Metrics {
     m.pax_total = w.pax.len();
     for p in &w.pax {
+        if p.gone {
+            // 按了就跑的人：外呼按下了，人走了，灯还亮着
+            m.pax_press_and_run += 1;
+            continue;
+        }
         if p.hops_done == 0 {
             // 一条腿都没走完：还在厅里等、还在车上，或者还没进场。
             // 走楼梯的人出生就算走完一条腿，不会落进这里
@@ -2575,6 +2647,59 @@ mod tests {
             let sum: u64 = r.metrics.by_floor.iter().map(|f| f.count as u64).sum();
             assert_eq!(r.metrics.wait.count, sum);
         }
+    }
+
+    /// 假内选只能按这台车真停的层，也不能按自己要去的层与当前层。
+    #[test]
+    fn fake_inside_calls_stay_within_the_car_panel() {
+        let mut w = World::new(small());
+        w.cfg.malice.inside_spam_floors = 4;
+        w.pax[0].to = 4;
+        let mut rng = Streams::new(7);
+        press_fake_calls(&mut w, 0, 0, &mut rng);
+        assert!(!w.cars[0].extra_calls.is_empty(), "四个假层总该按下一个");
+        assert!(!w.cars[0].extra_calls.contains(&4), "不能按自己的目的层");
+        assert!(!w.cars[0].extra_calls.contains(&1), "不能按当前层");
+        assert!(
+            w.cars[0].extra_calls.iter().all(|&l| w.car_serves(0, l)),
+            "面板上没有不服务的层"
+        );
+    }
+
+    /// 全员乱按内选，白停次数应当明显多出来。客流本身不动，
+    /// 只是多按了没人去的层，所以送达人数不该跟着变。
+    #[test]
+    fn inside_spam_adds_stops_nobody_asked_for() {
+        let mk = |share: f64| {
+            let mut c = small();
+            c.malice.inside_spam_share = share;
+            c
+        };
+        let calm = default_run(mk(0.0));
+        let spam = default_run(mk(1.0));
+        assert_eq!(
+            calm.metrics.pax_served, spam.metrics.pax_served,
+            "乱按不该改变客流"
+        );
+        assert!(
+            spam.metrics.ghost_stops > calm.metrics.ghost_stops,
+            "乱按应当多出白停：{} 对 {}",
+            spam.metrics.ghost_stops,
+            calm.metrics.ghost_stops
+        );
+    }
+
+    /// 按了就跑：按下外呼后走人，灯留到车来。既不算走楼梯，也不进等待分布。
+    #[test]
+    fn press_and_run_leaves_the_call_lit() {
+        let mut c = small();
+        c.malice.press_and_run_share = 1.0;
+        // 楼梯关掉也要能走，否则测的是弃梯而不是跑
+        c.stairs.enabled = false;
+        let r = default_run(c);
+        assert!(r.metrics.pax_press_and_run > 0, "应当有人按了就跑");
+        assert_eq!(r.metrics.stair_users, 0, "跑了不等于走楼梯");
+        assert!(r.metrics.ghost_stops > 0, "灯留着，车总得白停一次才灭");
     }
 
     /// 过期计时器不赶人。换腿和僵局重排都会推迟 abandon_at，

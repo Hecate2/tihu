@@ -234,6 +234,7 @@ pub struct Scalars {
     pub stair_users: f64,
     pub stair_share: f64,
     pub abandoned: f64,
+    pub pax_press_and_run: f64,
     pub trips_expected: f64,
     pub trips: f64,
     pub rtt_mean: f64,
@@ -260,6 +261,7 @@ struct ScalarAcc {
     stair_users: Acc,
     stair_share: Acc,
     abandoned: Acc,
+    pax_press_and_run: Acc,
     trips_expected: Acc,
     trips: Acc,
     rtt_mean: Acc,
@@ -290,6 +292,7 @@ impl ScalarAcc {
         self.stair_users.add(m.stair_users as f64);
         self.stair_share.add(m.stair_share);
         self.abandoned.add(m.abandoned as f64);
+        self.pax_press_and_run.add(m.pax_press_and_run as f64);
         self.trips_expected.add(expected_trips as f64);
         self.trips.add(m.trips as f64);
         self.rtt_mean.add(m.rtt_mean);
@@ -316,6 +319,7 @@ impl ScalarAcc {
             stair_users: self.stair_users.mean(),
             stair_share: self.stair_share.mean(),
             abandoned: self.abandoned.mean(),
+            pax_press_and_run: self.pax_press_and_run.mean(),
             trips_expected: self.trips_expected.mean(),
             trips: self.trips.mean(),
             rtt_mean: self.rtt_mean.mean(),
