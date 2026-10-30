@@ -18,7 +18,10 @@ const MULT: u64 = 6364136223846793005;
 impl Pcg32 {
     /// 用一个 64 位种子初始化。
     pub fn new(seed: u64) -> Self {
-        let mut g = Self { state: 0, inc: (seed << 1) | 1 };
+        let mut g = Self {
+            state: 0,
+            inc: (seed << 1) | 1,
+        };
         g.step();
         g.state = g.state.wrapping_add(seed);
         g.step();
@@ -198,7 +201,12 @@ pub struct Streams {
 impl Streams {
     /// 从根种子派生出全部流。
     pub fn new(root: u64) -> Self {
-        Self { gens: Stream::ALL.iter().map(|&s| Pcg32::new(splitmix64(root, s as u64))).collect() }
+        Self {
+            gens: Stream::ALL
+                .iter()
+                .map(|&s| Pcg32::new(splitmix64(root, s as u64)))
+                .collect(),
+        }
     }
 
     #[inline]
@@ -378,7 +386,10 @@ mod tests {
             sum += g.beta(2.0, 2.0);
         }
         let mean = sum / n as f64;
-        assert!((mean - 0.5).abs() < 0.01, "Beta(2,2) 均值应为 0.5，实际 {mean}");
+        assert!(
+            (mean - 0.5).abs() < 0.01,
+            "Beta(2,2) 均值应为 0.5，实际 {mean}"
+        );
     }
 
     #[test]
@@ -394,8 +405,15 @@ mod tests {
         }
         let mean = sum / n as f64;
         let var = sq / n as f64 - mean * mean;
-        assert!((mean - 65.1).abs() < 0.5, "体重的均值应在 65 kg 附近，实际 {mean}");
-        assert!((var.sqrt() - 11.7).abs() < 1.5, "标准差应在 12 kg 附近，实际 {}", var.sqrt());
+        assert!(
+            (mean - 65.1).abs() < 0.5,
+            "体重的均值应在 65 kg 附近，实际 {mean}"
+        );
+        assert!(
+            (var.sqrt() - 11.7).abs() < 1.5,
+            "标准差应在 12 kg 附近，实际 {}",
+            var.sqrt()
+        );
     }
 
     /// 卡方检验：把 `next_u32` 切成 16 个桶，样本要均匀。
@@ -494,7 +512,10 @@ mod tests {
         for root in 0..200u64 {
             for s in Stream::ALL {
                 let seed = splitmix64(root, s as u64);
-                assert!(seen.insert(seed), "root={root} stream={s:?} 的派生种子撞车了");
+                assert!(
+                    seen.insert(seed),
+                    "root={root} stream={s:?} 的派生种子撞车了"
+                );
             }
         }
     }

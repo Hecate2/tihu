@@ -55,7 +55,8 @@ const ROUTERS: &[RouterRow] = &[
     RouterRow {
         name: "down_peak_sweep",
         label: "定向扫楼：先上到顶再一路下行",
-        desc: "先开到当前最高的那个呼叫层，再一路往下扫到最低。早高峰大家同时下楼时最省事，晚高峰要上楼的客流会被它绕远。",
+        desc:
+            "先开到当前最高的那个呼叫层，再一路往下扫到最低。早高峰大家同时下楼时最省事，晚高峰要上楼的客流会被它绕远。",
         which: Which::DownPeakSweep,
     },
     RouterRow {
@@ -462,7 +463,12 @@ fn json<T: Serialize>(v: &T) -> String {
 fn fail(code: &'static str, message: String) -> String {
     json(&Response {
         ok: false,
-        issues: vec![IssueDto { severity: "error", code, message, level: None }],
+        issues: vec![IssueDto {
+            severity: "error",
+            code,
+            message,
+            level: None,
+        }],
         sim: None,
     })
 }
@@ -476,9 +482,7 @@ pub fn default_config_json() -> String {
 pub fn presets_json() -> String {
     let list: Vec<serde_json::Value> = tihu_core::config::preset_names()
         .iter()
-        .map(|n| {
-            serde_json::json!({ "name": n, "label": preset_label(n) })
-        })
+        .map(|n| serde_json::json!({ "name": n, "label": preset_label(n) }))
         .collect();
     json(&list)
 }
@@ -531,7 +535,9 @@ pub fn speed_tiers_json() -> String {
 /// 上下客规则与满载直驶阈值都按配置走，不用写死的默认值，
 /// 否则网页上根本没有旋钮能拧动拒挤曲线。
 fn dispatch(cfg: Config, which: Which) -> Run {
-    let b = tihu_core::builtin::DefaultBoarding { cfg: cfg.boarding.clone() };
+    let b = tihu_core::builtin::DefaultBoarding {
+        cfg: cfg.boarding.clone(),
+    };
     match which {
         Which::DownPeakSweep => sim::run(cfg, &mut DownPeakSweep, &mut LoadAwareEta::default(), &b),
         Which::CollectiveScan => {
@@ -545,7 +551,9 @@ fn dispatch(cfg: Config, which: Which) -> Run {
 /// 与 `dispatch` 用同一组算法对象，区别只在循环在哪儿。聚合口径见
 /// [`tihu_core::batch`]。
 fn dispatch_batch(cfg: Config, which: Which) -> SeedBatch {
-    let b = tihu_core::builtin::DefaultBoarding { cfg: cfg.boarding.clone() };
+    let b = tihu_core::builtin::DefaultBoarding {
+        cfg: cfg.boarding.clone(),
+    };
     match which {
         Which::DownPeakSweep => {
             batch::run_seeds(&cfg, &mut DownPeakSweep, &mut LoadAwareEta::default(), &b)
@@ -573,7 +581,11 @@ pub fn report_json(cfg_json: &str, router: &str) -> String {
     let v = cfg.validate();
     if !v.is_ok() {
         let issues: Vec<IssueDto> = v.issues.iter().map(IssueDto::of).collect();
-        return json(&Response { ok: false, issues, sim: None });
+        return json(&Response {
+            ok: false,
+            issues,
+            sim: None,
+        });
     }
     let cfg = cfg.sanitized();
     // 结束值大于根种子才走批量，否则照旧单跑，报告里一个批量字段都不出现
@@ -584,7 +596,11 @@ pub fn report_json(cfg_json: &str, router: &str) -> String {
         let run = dispatch(cfg, row.which);
         SimReport::of(&run, row.name)
     };
-    json(&Response { ok: true, issues: vec![], sim: Some(sim) })
+    json(&Response {
+        ok: true,
+        issues: vec![],
+        sim: Some(sim),
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -647,7 +663,10 @@ pub unsafe extern "C" fn tihu_run(cfg_ptr: *const u8, cfg_len: usize, router_id:
     let Some(row) = ROUTERS.get(router_id as usize) else {
         return to_buf(fail(
             "unknown_router",
-            format!("走向算法序号 {router_id} 越界，表里只有 {} 个", ROUTERS.len()),
+            format!(
+                "走向算法序号 {router_id} 越界，表里只有 {} 个",
+                ROUTERS.len()
+            ),
         ));
     };
     let json = if cfg_ptr.is_null() || cfg_len == 0 {
@@ -718,7 +737,10 @@ mod tests {
         let r = report_json(&default_config_json(), "down_peak_sweep");
         let v: serde_json::Value = serde_json::from_str(&r).unwrap();
         assert_eq!(v["ok"], true, "默认配置应当跑得起来：{r}");
-        assert!(v["sim"]["pax_served"].as_u64().unwrap() > 0, "应当有人被送达");
+        assert!(
+            v["sim"]["pax_served"].as_u64().unwrap() > 0,
+            "应当有人被送达"
+        );
         assert!(v["sim"]["wait"]["mean"].as_f64().unwrap() > 0.0);
         assert_eq!(v["sim"]["router"], "down_peak_sweep");
     }
@@ -732,11 +754,21 @@ mod tests {
         let r = report_json(&cfg, "down_peak_sweep");
         let v: serde_json::Value = serde_json::from_str(&r).unwrap();
         let floors = v["sim"]["floors"].as_array().unwrap();
-        assert_eq!(floors.len(), c.building.n_levels() - 1, "层号 0 不存在，明细要比格位数少一格");
-        assert!(floors.iter().all(|f| f["level"] != 0), "层号 0 不该出现在明细里");
+        assert_eq!(
+            floors.len(),
+            c.building.n_levels() - 1,
+            "层号 0 不存在，明细要比格位数少一格"
+        );
+        assert!(
+            floors.iter().all(|f| f["level"] != 0),
+            "层号 0 不该出现在明细里"
+        );
         assert_eq!(floors[0]["level"], -2);
         assert_eq!(floors[0]["label"], "B2");
-        assert_eq!(floors[2]["label"], "1F", "第 1 层是主入口层，前面正好是 B2、B1");
+        assert_eq!(
+            floors[2]["label"], "1F",
+            "第 1 层是主入口层，前面正好是 B2、B1"
+        );
     }
 
     /// 全部预设都要能跑，一个都不许 panic。
@@ -825,7 +857,11 @@ mod tests {
         names.dedup();
         assert_eq!(names.len(), n, "算法名撞车了");
         for r in ROUTERS {
-            assert!(!r.label.is_empty() && !r.desc.is_empty(), "{} 缺标签或解释", r.name);
+            assert!(
+                !r.label.is_empty() && !r.desc.is_empty(),
+                "{} 缺标签或解释",
+                r.name
+            );
         }
         // 下拉框读到几项，表里就该有几项
         let advertised: serde_json::Value = serde_json::from_str(&routers_json()).unwrap();
@@ -856,17 +892,27 @@ mod tests {
                 assert_eq!((b, m, w), (0.0, 0.0, 0.0), "没人出发的楼层三个值都该是 0");
                 continue;
             }
-            assert!(b <= m + 1e-9 && m <= w + 1e-9, "第 {f} 层较好 ≤ 平均 ≤ 较差不成立");
+            assert!(
+                b <= m + 1e-9 && m <= w + 1e-9,
+                "第 {f} 层较好 ≤ 平均 ≤ 较差不成立"
+            );
             let (db, dm, dw) = (
                 f["d2d_best"].as_f64().unwrap(),
                 f["d2d_mean"].as_f64().unwrap(),
                 f["d2d_worst"].as_f64().unwrap(),
             );
             if f["live"].as_u64().unwrap() == 0 {
-                assert_eq!((db, dm, dw), (0.0, 0.0, 0.0), "没人出发的楼层门到门三个值都该是 0");
+                assert_eq!(
+                    (db, dm, dw),
+                    (0.0, 0.0, 0.0),
+                    "没人出发的楼层门到门三个值都该是 0"
+                );
                 continue;
             }
-            assert!(db <= dm + 1e-9 && dm <= dw + 1e-9, "第 {f} 层门到门较好 ≤ 平均 ≤ 较差不成立");
+            assert!(
+                db <= dm + 1e-9 && dm <= dw + 1e-9,
+                "第 {f} 层门到门较好 ≤ 平均 ≤ 较差不成立"
+            );
             assert!(dm + 1e-9 >= m, "第 {f} 层门到门均值不该小于等待均值");
         }
     }
@@ -947,7 +993,10 @@ mod tests {
     #[test]
     fn report_has_no_nan() {
         let r = report_json(&default_config_json(), "down_peak_sweep");
-        assert!(!r.contains("NaN") && !r.contains("null"), "报告里有非有限值：{r}");
+        assert!(
+            !r.contains("NaN") && !r.contains("null"),
+            "报告里有非有限值：{r}"
+        );
     }
 
     /// 缓冲区的前四字节就是负载长度，JS 按这个读。

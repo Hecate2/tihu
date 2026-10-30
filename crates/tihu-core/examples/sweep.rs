@@ -86,7 +86,10 @@ impl Table {
         for (i, (_, w)) in self.cols.iter().enumerate() {
             let c = cells.get(i).map(|s| s.as_str()).unwrap_or("");
             // 中文字符占了两个显示宽度，按字符数补空格会歪。这里用显示的宽度估算
-            let shown = c.chars().map(|ch| if ch as u32 > 0x2000 { 2 } else { 1 }).sum::<usize>();
+            let shown = c
+                .chars()
+                .map(|ch| if ch as u32 > 0x2000 { 2 } else { 1 })
+                .sum::<usize>();
             let pad = w.saturating_sub(shown);
             line.push_str(&format!(" {c}{} |", " ".repeat(pad)));
         }
@@ -197,7 +200,10 @@ fn main() {
     let top = 33;
     let variants: [(&str, Vec<StopSpec>); 4] = [
         ("两台都全停", vec![StopSpec::All, StopSpec::All]),
-        ("单双层", vec![StopSpec::parity(true), StopSpec::parity(false)]),
+        (
+            "单双层",
+            vec![StopSpec::parity(true), StopSpec::parity(false)],
+        ),
         (
             "高低区",
             vec![
@@ -205,7 +211,10 @@ fn main() {
                 StopSpec::union(vec![StopSpec::zone(18, top), StopSpec::zone(1, 1)]),
             ],
         ),
-        ("一台全停一台单层", vec![StopSpec::All, StopSpec::parity(true)]),
+        (
+            "一台全停一台单层",
+            vec![StopSpec::All, StopSpec::parity(true)],
+        ),
     ];
     for (name, specs) in variants {
         let mut c = house(true, 2);
@@ -218,7 +227,13 @@ fn main() {
             continue;
         }
         let s = Stats::of(&c);
-        t.row(&[name.to_string(), f1(s.wait_mean), f1(s.wait_p90), pct(s.bypass), f1(s.rtt)]);
+        t.row(&[
+            name.to_string(),
+            f1(s.wait_mean),
+            f1(s.wait_p90),
+            pct(s.bypass),
+            f1(s.rtt),
+        ]);
     }
 
     // ---------------- 速度档 ----------------
@@ -234,7 +249,13 @@ fn main() {
         ("往返 s", 8),
     ]);
     t.head();
-    for name in ["low_rise_1_0", "std_1_6", "std_1_75", "high_2_5", "high_3_0"] {
+    for name in [
+        "low_rise_1_0",
+        "std_1_6",
+        "std_1_75",
+        "high_2_5",
+        "high_3_0",
+    ] {
         let p = MotionProfile::preset(name).unwrap();
         let mut c = house(true, 2);
         for car in &mut c.cars {
@@ -242,7 +263,13 @@ fn main() {
             car.down = p;
         }
         let s = Stats::of(&c);
-        t.row(&[name.to_string(), format!("{:.2}", p.v_max), f1(s.wait_mean), f1(s.wait_p90), f1(s.rtt)]);
+        t.row(&[
+            name.to_string(),
+            format!("{:.2}", p.v_max),
+            f1(s.wait_mean),
+            f1(s.wait_p90),
+            f1(s.rtt),
+        ]);
     }
 
     // ---------------- 客流模式 ----------------
@@ -269,7 +296,13 @@ fn main() {
             c.traffic.reverse_ratio = 0.5;
         }
         let s = Stats::of(&c);
-        t.row(&[name.to_string(), f1(s.wait_mean), f1(s.wait_p90), pct(s.bypass), pct(s.stairs)]);
+        t.row(&[
+            name.to_string(),
+            f1(s.wait_mean),
+            f1(s.wait_p90),
+            pct(s.bypass),
+            pct(s.stairs),
+        ]);
     }
 
     // ---------------- 晚高峰加车 ----------------
@@ -277,7 +310,11 @@ fn main() {
         "晚高峰加车有没有用",
         "三十三层六户，全停。晚高峰上行的需求全压在主入口层，加车帮不上忙。",
     );
-    let t = Table::new(vec![("台数", 6), ("早高峰平均等梯 s", 16), ("晚高峰平均等梯 s", 16)]);
+    let t = Table::new(vec![
+        ("台数", 6),
+        ("早高峰平均等梯 s", 16),
+        ("晚高峰平均等梯 s", 16),
+    ]);
     t.head();
     for cars in [2, 3, 4, 6] {
         let morning = house(true, cars);
@@ -295,13 +332,20 @@ fn main() {
     );
     let t = Table::new(vec![("时段", 14), ("种子", 6), ("六台车各自的趟数", 28)]);
     t.head();
-    for (name, p) in [("早高峰下行", Pattern::MorningDown), ("晚高峰上行", Pattern::EveningUp)] {
+    for (name, p) in [
+        ("早高峰下行", Pattern::MorningDown),
+        ("晚高峰上行", Pattern::EveningUp),
+    ] {
         for seed in [1u64, 3, 4] {
             let mut c = house(true, 6);
             c.traffic.pattern = p;
             let r = quick(c, seed);
-            let trips: Vec<String> =
-                r.world.cars.iter().map(|car| car.trips.to_string()).collect();
+            let trips: Vec<String> = r
+                .world
+                .cars
+                .iter()
+                .map(|car| car.trips.to_string())
+                .collect();
             t.row(&[name.to_string(), seed.to_string(), trips.join(", ")]);
         }
     }
@@ -323,7 +367,13 @@ fn main() {
         let mut c = house(false, 2);
         c.stairs.enabled = on;
         let s = Stats::of(&c);
-        t.row(&[name.to_string(), f1(s.wait_mean), f1(s.wait_p90), pct(s.stairs), pct(s.served)]);
+        t.row(&[
+            name.to_string(),
+            f1(s.wait_mean),
+            f1(s.wait_p90),
+            pct(s.stairs),
+            pct(s.served),
+        ]);
     }
 
     // ---------------- 种子噪声 ----------------
@@ -332,7 +382,12 @@ fn main() {
         "三十三层六户两梯，同一份配置换种子。看趋势时至少要跑三个种子，否则会把噪声当趋势。",
     );
     let c = house(true, 2);
-    let t = Table::new(vec![("种子", 8), ("平均等梯 s", 12), ("P90 等梯 s", 12), ("送达率", 8)]);
+    let t = Table::new(vec![
+        ("种子", 8),
+        ("平均等梯 s", 12),
+        ("P90 等梯 s", 12),
+        ("送达率", 8),
+    ]);
     t.head();
     let mut means = Vec::new();
     for seed in 1..=5u64 {
@@ -343,7 +398,11 @@ fn main() {
             seed.to_string(),
             f1(m.wait.mean()),
             f1(m.wait.p90()),
-            pct(if m.pax_total > 0 { m.pax_served as f64 / m.pax_total as f64 } else { 0.0 }),
+            pct(if m.pax_total > 0 {
+                m.pax_served as f64 / m.pax_total as f64
+            } else {
+                0.0
+            }),
         ]);
     }
     let lo = means.iter().cloned().fold(f64::INFINITY, f64::min);

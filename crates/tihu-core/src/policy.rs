@@ -158,12 +158,20 @@ impl RunView<'_> {
     /// 上行接人时用这个。早高峰名下几乎全是下行外呼，若按方向分别取极值，
     /// 一个方向的任务会被漏掉，所以这里取所有任务里字面最高的一层。
     pub fn highest_pending(&self) -> Option<i16> {
-        self.mine.iter().map(|c| c.level).max().or_else(|| self.highest_car_call())
+        self.mine
+            .iter()
+            .map(|c| c.level)
+            .max()
+            .or_else(|| self.highest_car_call())
     }
 
     /// 全部未完成任务里最低的一层，方向不分。
     pub fn lowest_pending(&self) -> Option<i16> {
-        self.mine.iter().map(|c| c.level).min().or_else(|| self.lowest_car_call())
+        self.mine
+            .iter()
+            .map(|c| c.level)
+            .min()
+            .or_else(|| self.lowest_car_call())
     }
 }
 
@@ -274,8 +282,20 @@ mod tests {
         static EMPTY_Q: [u32; 0] = [];
         let mine: &'static [HallCall] = Box::leak(
             vec![
-                HallCall { id: 0, level: high.unwrap_or(20), dir: Dir::Up, owner: Some(0), waiting: 2 },
-                HallCall { id: 1, level: low.unwrap_or(3), dir: Dir::Down, owner: Some(0), waiting: 5 },
+                HallCall {
+                    id: 0,
+                    level: high.unwrap_or(20),
+                    dir: Dir::Up,
+                    owner: Some(0),
+                    waiting: 2,
+                },
+                HallCall {
+                    id: 1,
+                    level: low.unwrap_or(3),
+                    dir: Dir::Down,
+                    owner: Some(0),
+                    waiting: 5,
+                },
             ]
             .into_boxed_slice(),
         );

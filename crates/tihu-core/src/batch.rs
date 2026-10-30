@@ -359,7 +359,10 @@ struct Accum {
 
 impl Accum {
     fn new(n_levels: usize) -> Self {
-        Self { floors: vec![FloorAcc::default(); n_levels], ..Self::default() }
+        Self {
+            floors: vec![FloorAcc::default(); n_levels],
+            ..Self::default()
+        }
     }
 
     fn add(&mut self, m: &Metrics, expected_trips: usize, horizon_s: f64) {
@@ -440,7 +443,12 @@ mod tests {
         let mut c = cfg.clone();
         c.sim.seed = seed;
         c.sim.seed_to = None;
-        sim::run(c, &mut DownPeakSweep, &mut LoadAwareEta::default(), &DefaultBoarding::default())
+        sim::run(
+            c,
+            &mut DownPeakSweep,
+            &mut LoadAwareEta::default(),
+            &DefaultBoarding::default(),
+        )
     }
 
     /// 批量结果必须等于逐次单跑再平均。这是唯一的口径来源。
@@ -462,7 +470,11 @@ mod tests {
         let singles: Vec<_> = (42..=44).map(|s| one(&cfg, s).metrics).collect();
         let want_mean: f64 =
             singles.iter().map(|m| m.wait.mean()).sum::<f64>() / singles.len() as f64;
-        assert!((b.wait.mean - want_mean).abs() < 1e-9, "全局均值 {} 与逐次平均 {want_mean} 不符", b.wait.mean);
+        assert!(
+            (b.wait.mean - want_mean).abs() < 1e-9,
+            "全局均值 {} 与逐次平均 {want_mean} 不符",
+            b.wait.mean
+        );
 
         // 逐层：均值取各次平均的平均，较好与较差取其中的最小与最大
         for (i, fa) in b.floors.iter().enumerate() {
@@ -491,11 +503,20 @@ mod tests {
             assert_eq!(dlive.len(), live.len(), "第 {i} 格门到门的样本次数对不上");
             if !dlive.is_empty() {
                 let dmean = dlive.iter().sum::<f64>() / dlive.len() as f64;
-                assert!((fa.d2d_mean - dmean).abs() < 1e-9, "第 {i} 格门到门均值不符");
+                assert!(
+                    (fa.d2d_mean - dmean).abs() < 1e-9,
+                    "第 {i} 格门到门均值不符"
+                );
                 let dbest = dlive.iter().copied().fold(f64::INFINITY, f64::min);
                 let dworst = dlive.iter().copied().fold(0.0, f64::max);
-                assert!((fa.d2d_best - dbest).abs() < 1e-9, "第 {i} 格门到门较好值不符");
-                assert!((fa.d2d_worst - dworst).abs() < 1e-9, "第 {i} 格门到门较差值不符");
+                assert!(
+                    (fa.d2d_best - dbest).abs() < 1e-9,
+                    "第 {i} 格门到门较好值不符"
+                );
+                assert!(
+                    (fa.d2d_worst - dworst).abs() < 1e-9,
+                    "第 {i} 格门到门较差值不符"
+                );
                 assert!(fa.d2d_best <= fa.d2d_mean + 1e-9 && fa.d2d_mean <= fa.d2d_worst + 1e-9);
             }
         }
@@ -513,7 +534,12 @@ mod tests {
         cfg.sim.seed = 7;
         cfg.sim.seed_to = Some(10);
         let mk = || {
-            run_seeds(&cfg, &mut DownPeakSweep, &mut LoadAwareEta::default(), &DefaultBoarding::default())
+            run_seeds(
+                &cfg,
+                &mut DownPeakSweep,
+                &mut LoadAwareEta::default(),
+                &DefaultBoarding::default(),
+            )
         };
         let a = mk();
         let b = mk();

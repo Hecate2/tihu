@@ -1157,8 +1157,10 @@ impl Config {
                 "体重分布至少要有一个分量".into(),
             ));
         } else if self.weight.peaks.iter().any(|p| p.share < 0.0) {
-            v.issues
-                .push(Issue::error("weight_share", "体重分量的占比不能是负数".into()));
+            v.issues.push(Issue::error(
+                "weight_share",
+                "体重分量的占比不能是负数".into(),
+            ));
         } else if self.weight.peaks.iter().map(|p| p.share).sum::<f64>() <= 0.0 {
             v.issues.push(Issue::error(
                 "weight_share",
@@ -1174,8 +1176,10 @@ impl Config {
             v.issues
                 .push(Issue::error("strategy_share", "策略占比不能是负数".into()));
         } else if s.honest + s.press_both + s.press_up_only + s.multi_call <= 0.0 {
-            v.issues
-                .push(Issue::error("strategy_share", "策略占比之和要大于 0".into()));
+            v.issues.push(Issue::error(
+                "strategy_share",
+                "策略占比之和要大于 0".into(),
+            ));
         }
         // 每一层都要有至少一台轿厢愿意停，否则那一层的人永远等不到车。
         // 层号 0 不存在，跳过
@@ -1275,10 +1279,9 @@ impl Config {
             c.down = c.down.sanitized();
             c.capacity_rated = c.capacity_rated.clamp(1, 40);
             c.rated_load_kg = c.rated_load_kg.clamp(100.0, 5000.0);
-            c.initial_level = c.initial_level.clamp(
-                -self.building.basement_levels,
-                self.building.top_level,
-            );
+            c.initial_level = c
+                .initial_level
+                .clamp(-self.building.basement_levels, self.building.top_level);
             // 层号 0 不存在（MODEL 2.1）。无地下层时夹取区间的下界就是 0，
             // 会把这个不存在的层放进来，落回主入口层
             if c.initial_level == 0 {
@@ -1474,13 +1477,19 @@ mod tests {
         let mut c = Config::default();
         c.cars[0].initial_level = 0;
         let c = c.sanitized();
-        assert_eq!(c.cars[0].initial_level, LOBBY, "层号 0 不存在，要落回主入口层");
+        assert_eq!(
+            c.cars[0].initial_level, LOBBY,
+            "层号 0 不存在，要落回主入口层"
+        );
 
         let mut c = c;
         c.building.basement_levels = 2;
         c.cars[0].initial_level = 0;
         let c = c.sanitized();
-        assert_eq!(c.cars[0].initial_level, LOBBY, "有地下层时 0 也得落回主入口层");
+        assert_eq!(
+            c.cars[0].initial_level, LOBBY,
+            "有地下层时 0 也得落回主入口层"
+        );
     }
 
     /// 每层 18 户的大板楼合法，sanitized 不许打回 12。

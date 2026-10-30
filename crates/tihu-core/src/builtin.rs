@@ -5,7 +5,9 @@
 
 use crate::config::Boarding as BoardCfg;
 use crate::motion::Dir;
-use crate::policy::{AdmitSample, Assigner, Boarding, CarId, HallCall, Leg, RunView, SystemView, Verdict};
+use crate::policy::{
+    AdmitSample, Assigner, Boarding, CarId, HallCall, Leg, RunView, SystemView, Verdict,
+};
 
 /// 经典集选。保持方向，把沿途同向外呼和内选服务完，到底才反向。
 ///
@@ -246,7 +248,12 @@ pub struct LoadAwareEta {
 
 impl Default for LoadAwareEta {
     fn default() -> Self {
-        Self { load_penalty: 12.0, full_penalty: 40.0, dir_penalty: 25.0, backlog_penalty: 8.0 }
+        Self {
+            load_penalty: 12.0,
+            full_penalty: 40.0,
+            dir_penalty: 25.0,
+            backlog_penalty: 8.0,
+        }
     }
 }
 
@@ -304,7 +311,11 @@ pub struct RescueWrapper<A> {
 
 impl<A: Assigner> RescueWrapper<A> {
     pub fn new(inner: A) -> Self {
-        Self { inner, threshold_s: 60.0, rescued: 0 }
+        Self {
+            inner,
+            threshold_s: 60.0,
+            rescued: 0,
+        }
     }
 }
 
@@ -319,7 +330,11 @@ impl<A: Assigner> Assigner for RescueWrapper<A> {
 
     fn reassign(&self, v: &SystemView<'_>, owned: &mut [Option<CarId>]) {
         self.inner.reassign(v, owned);
-        if !v.cars.iter().any(|c| c.stalled && c.stall_for > self.threshold_s) {
+        if !v
+            .cars
+            .iter()
+            .any(|c| c.stalled && c.stall_for > self.threshold_s)
+        {
             return;
         }
         // 指向僵死轿厢的外呼改派给负载最小的活轿厢。载客数是视图里的定值，
@@ -349,7 +364,9 @@ pub struct DefaultBoarding {
 
 impl Default for DefaultBoarding {
     fn default() -> Self {
-        Self { cfg: BoardCfg::default() }
+        Self {
+            cfg: BoardCfg::default(),
+        }
     }
 }
 
@@ -391,7 +408,13 @@ mod tests {
     static EMPTY_CALLS: [HallCall; 0] = [];
     static EMPTY_Q: [u32; 0] = [];
 
-    fn rv(at: f32, dir: Dir, mine: Vec<HallCall>, car_calls: Vec<i16>, load: usize) -> RunView<'static> {
+    fn rv(
+        at: f32,
+        dir: Dir,
+        mine: Vec<HallCall>,
+        car_calls: Vec<i16>,
+        load: usize,
+    ) -> RunView<'static> {
         // 把两个 Vec 泄漏成 'static 切片，测试专用
         let mine: &'static [HallCall] = Box::leak(mine.into_boxed_slice());
         let car_calls: &'static [i16] = Box::leak(car_calls.into_boxed_slice());
@@ -420,7 +443,13 @@ mod tests {
     }
 
     fn call(level: i16, dir: Dir) -> HallCall {
-        HallCall { id: level as u32, level, dir, owner: Some(0), waiting: 1 }
+        HallCall {
+            id: level as u32,
+            level,
+            dir,
+            owner: Some(0),
+            waiting: 1,
+        }
     }
 
     /// 集选：上行时挑最高的上行业务，同向没人了就反向。
@@ -482,13 +511,22 @@ mod tests {
         let s = DownPeakSweep;
         // 任务都在上方时，先上到最高的那层，再开始往下扫
         let above_only = vec![call(30, Dir::Down), call(25, Dir::Down)];
-        assert_eq!(s.next_leg(&rv(20.0, Dir::Up, above_only, vec![], 0)), Leg::Up(30));
+        assert_eq!(
+            s.next_leg(&rv(20.0, Dir::Up, above_only, vec![], 0)),
+            Leg::Up(30)
+        );
     }
 
     #[test]
     fn sweep_serves_down_calls_on_the_way_down() {
         let s = DownPeakSweep;
-        let v = rv(20.0, Dir::Down, vec![call(12, Dir::Down), call(3, Dir::Down)], vec![], 0);
+        let v = rv(
+            20.0,
+            Dir::Down,
+            vec![call(12, Dir::Down), call(3, Dir::Down)],
+            vec![],
+            0,
+        );
         assert_eq!(s.next_leg(&v), Leg::Down(3));
     }
 
@@ -524,7 +562,13 @@ mod tests {
 
     #[test]
     fn nearest_car_picks_the_closest() {
-        let v = system(vec![brief(0, 3.0, Dir::None, 0, false), brief(1, 28.0, Dir::None, 0, false)], vec![]);
+        let v = system(
+            vec![
+                brief(0, 3.0, Dir::None, 0, false),
+                brief(1, 28.0, Dir::None, 0, false),
+            ],
+            vec![],
+        );
         assert_eq!(NearestCar.assign(&v, call(5, Dir::Down)), Some(0));
         assert_eq!(NearestCar.assign(&v, call(30, Dir::Down)), Some(1));
     }
@@ -532,7 +576,13 @@ mod tests {
     /// 卡死的轿厢不该被派到新活。
     #[test]
     fn stalled_car_is_never_assigned() {
-        let v = system(vec![brief(0, 5.0, Dir::None, 0, true), brief(1, 6.0, Dir::None, 0, false)], vec![]);
+        let v = system(
+            vec![
+                brief(0, 5.0, Dir::None, 0, true),
+                brief(1, 6.0, Dir::None, 0, false),
+            ],
+            vec![],
+        );
         assert_eq!(NearestCar.assign(&v, call(5, Dir::Down)), Some(1));
         assert_eq!(EtaMin::default().assign(&v, call(5, Dir::Down)), Some(1));
     }
@@ -541,12 +591,18 @@ mod tests {
     #[test]
     fn load_aware_prefers_empty_car() {
         let v = system(
-            vec![brief(0, 5.0, Dir::None, 12, false), brief(1, 7.0, Dir::None, 0, false)],
+            vec![
+                brief(0, 5.0, Dir::None, 12, false),
+                brief(1, 7.0, Dir::None, 0, false),
+            ],
             vec![],
         );
         // 两台都很近，但 0 号满了
         assert_eq!(NearestCar.assign(&v, call(5, Dir::Down)), Some(0));
-        assert_eq!(LoadAwareEta::default().assign(&v, call(5, Dir::Down)), Some(1));
+        assert_eq!(
+            LoadAwareEta::default().assign(&v, call(5, Dir::Down)),
+            Some(1)
+        );
     }
 
     /// 红线所在：不救活的派梯会让外呼一直挂在卡死的车上。
@@ -554,7 +610,10 @@ mod tests {
     fn rescue_wrapper_reassigns_away_from_stalled_car() {
         let mut owned = vec![Some(0), None, Some(0)];
         let v = system(
-            vec![brief(0, 10.0, Dir::None, 13, true), brief(1, 12.0, Dir::None, 2, false)],
+            vec![
+                brief(0, 10.0, Dir::None, 13, true),
+                brief(1, 12.0, Dir::None, 2, false),
+            ],
             vec![],
         );
         let wrapper = RescueWrapper::new(NearestCar);
@@ -569,7 +628,10 @@ mod tests {
     fn rescue_wrapper_leaves_calls_alone_when_every_car_is_stalled() {
         let mut owned = vec![Some(0), Some(1), None];
         let v = system(
-            vec![brief(0, 10.0, Dir::None, 13, true), brief(1, 12.0, Dir::None, 2, true)],
+            vec![
+                brief(0, 10.0, Dir::None, 13, true),
+                brief(1, 12.0, Dir::None, 2, true),
+            ],
             vec![],
         );
         RescueWrapper::new(NearestCar).reassign(&v, &mut owned);
@@ -581,7 +643,10 @@ mod tests {
     fn plain_assigner_leaves_calls_on_stalled_car() {
         let mut owned = vec![Some(0), None, Some(0)];
         let v = system(
-            vec![brief(0, 10.0, Dir::None, 13, true), brief(1, 12.0, Dir::None, 2, false)],
+            vec![
+                brief(0, 10.0, Dir::None, 13, true),
+                brief(1, 12.0, Dir::None, 2, false),
+            ],
             vec![],
         );
         NearestCar.reassign(&v, &mut owned);
@@ -592,27 +657,65 @@ mod tests {
     #[test]
     fn boarding_reports_no_space_before_declined() {
         let b = DefaultBoarding::default();
-        let full = AdmitSample { load_ratio: 1.0, free_slots: 0, waited_s: 0.0, weight_ratio: 1.0 };
+        let full = AdmitSample {
+            load_ratio: 1.0,
+            free_slots: 0,
+            waited_s: 0.0,
+            weight_ratio: 1.0,
+        };
         assert_eq!(b.admit_one(&full, 0.5), Verdict::NoSpace);
         // 有位子且不挤
-        let loose = AdmitSample { load_ratio: 0.5, free_slots: 6, waited_s: 0.0, weight_ratio: 0.4 };
+        let loose = AdmitSample {
+            load_ratio: 0.5,
+            free_slots: 6,
+            waited_s: 0.0,
+            weight_ratio: 0.4,
+        };
         assert_eq!(b.admit_one(&loose, 1.0), Verdict::Admit);
         // 很挤、最不情愿、刚到，概率压到 0
-        let tight = AdmitSample { load_ratio: 1.0, free_slots: 1, waited_s: 0.0, weight_ratio: 1.0 };
+        let tight = AdmitSample {
+            load_ratio: 1.0,
+            free_slots: 1,
+            waited_s: 0.0,
+            weight_ratio: 1.0,
+        };
         assert_eq!(b.admit_one(&tight, 1.0), Verdict::Declined);
         // 中间地带 admit_one 说可以，但概率很低，由引擎掷骰子决定
-        let edge = AdmitSample { load_ratio: 0.95, free_slots: 1, waited_s: 0.0, weight_ratio: 0.9 };
+        let edge = AdmitSample {
+            load_ratio: 0.95,
+            free_slots: 1,
+            waited_s: 0.0,
+            weight_ratio: 0.9,
+        };
         assert_eq!(b.admit_one(&edge, 1.0), Verdict::Admit);
-        assert!(b.accept_prob(&edge, 1.0) <= 0.25, "边缘状态概率应当很低，实际 {}", b.accept_prob(&edge, 1.0));
+        assert!(
+            b.accept_prob(&edge, 1.0) <= 0.25,
+            "边缘状态概率应当很低，实际 {}",
+            b.accept_prob(&edge, 1.0)
+        );
         // 等久了概率回升
-        let waited = AdmitSample { load_ratio: 0.95, free_slots: 1, waited_s: 300.0, weight_ratio: 0.9 };
-        assert!(b.accept_prob(&waited, 1.0) > b.accept_prob(&edge, 1.0), "等久了更可能挤上来");
+        let waited = AdmitSample {
+            load_ratio: 0.95,
+            free_slots: 1,
+            waited_s: 300.0,
+            weight_ratio: 0.9,
+        };
+        assert!(
+            b.accept_prob(&waited, 1.0) > b.accept_prob(&edge, 1.0),
+            "等久了更可能挤上来"
+        );
     }
 
     #[test]
     fn round_robin_cycles_and_resets() {
         let mut a = RoundRobin::default();
-        let v = system(vec![brief(0, 0.0, Dir::None, 0, false), brief(1, 0.0, Dir::None, 0, false)], vec![]);
+        let v = system(
+            vec![
+                brief(0, 0.0, Dir::None, 0, false),
+                brief(1, 0.0, Dir::None, 0, false),
+            ],
+            vec![],
+        );
         assert_eq!(a.assign(&v, call(5, Dir::Down)), Some(0));
         assert_eq!(a.assign(&v, call(5, Dir::Down)), Some(1));
         assert_eq!(a.assign(&v, call(5, Dir::Down)), Some(0));

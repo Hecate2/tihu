@@ -252,7 +252,10 @@ pub struct Metrics {
 impl Metrics {
     /// 造一份指标累加器，逐层统计先按楼层数铺好，运行期直接按下标累加。
     pub fn with_floors(n_levels: usize) -> Self {
-        Self { by_floor: vec![FloorStats::default(); n_levels], ..Self::default() }
+        Self {
+            by_floor: vec![FloorStats::default(); n_levels],
+            ..Self::default()
+        }
     }
 
     /// 五分钟输送人数，用于对照运力够不够。
@@ -365,7 +368,10 @@ mod tests {
         let mut m = a.clone();
         m.merge(&b);
         assert_eq!(m.count, 100);
-        assert!((m.mean() - expect).abs() < 1e-9, "合并后的均值应当等于整体均值");
+        assert!(
+            (m.mean() - expect).abs() < 1e-9,
+            "合并后的均值应当等于整体均值"
+        );
     }
 
     #[test]
@@ -374,7 +380,11 @@ mod tests {
         for _ in 0..100 {
             s.add(7.0);
         }
-        assert!(s.stddev() < 0.6, "全一样的样本标准差应当接近 0，实际 {}", s.stddev());
+        assert!(
+            s.stddev() < 0.6,
+            "全一样的样本标准差应当接近 0，实际 {}",
+            s.stddev()
+        );
     }
 
     #[test]

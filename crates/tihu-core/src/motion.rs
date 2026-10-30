@@ -28,7 +28,13 @@ pub struct MotionProfile {
 impl Default for MotionProfile {
     /// 住宅主流配置，待标定。见 `docs/MODEL.md` 第 3.1 节的表。
     fn default() -> Self {
-        Self { v_max: 1.75, a_acc: 0.80, a_dec: 0.80, j_acc: 1.00, j_dec: 1.00 }
+        Self {
+            v_max: 1.75,
+            a_acc: 0.80,
+            a_dec: 0.80,
+            j_acc: 1.00,
+            j_dec: 1.00,
+        }
     }
 }
 
@@ -56,7 +62,13 @@ impl MotionProfile {
             .min_by(|a, b| (a.0 - v_max).abs().total_cmp(&(b.0 - v_max).abs()))
             .copied()
             .expect("档位表是常量，至少有一档");
-        Self { v_max, a_acc: t.1, a_dec: t.1, j_acc: t.2, j_dec: t.2 }
+        Self {
+            v_max,
+            a_acc: t.1,
+            a_dec: t.1,
+            j_acc: t.2,
+            j_dec: t.2,
+        }
     }
 
     /// 住宅常见的速度档位预设。加速度与加加速度一律待标定。
@@ -77,7 +89,13 @@ impl MotionProfile {
 
     /// 全部预设的名字，供网页下拉框与命令行共用。
     pub fn preset_names() -> &'static [&'static str] {
-        &["low_rise_1_0", "std_1_6", "std_1_75", "high_2_5", "high_3_0"]
+        &[
+            "low_rise_1_0",
+            "std_1_6",
+            "std_1_75",
+            "high_2_5",
+            "high_3_0",
+        ]
     }
 
     /// 把参数夹到物理上说得过去的范围，防止除零与负数。
@@ -120,14 +138,22 @@ fn ramp(v: f64, a: f32, j: f32) -> (f64, f64) {
 pub fn traverse_time(dist: f64, p: MotionProfile) -> Traverse {
     let p = p.sanitized();
     if dist <= 0.0 {
-        return Traverse { time: 0.0, peak_speed: 0.0, reached_rated: false };
+        return Traverse {
+            time: 0.0,
+            peak_speed: 0.0,
+            reached_rated: false,
+        };
     }
     let (t_acc, d_acc) = ramp(p.v_max as f64, p.a_acc, p.j_acc);
     let (t_dec, d_dec) = ramp(p.v_max as f64, p.a_dec, p.j_dec);
 
     if dist >= d_acc + d_dec {
         let cruise = (dist - d_acc - d_dec) / p.v_max as f64;
-        return Traverse { time: t_acc + cruise + t_dec, peak_speed: p.v_max, reached_rated: true };
+        return Traverse {
+            time: t_acc + cruise + t_dec,
+            peak_speed: p.v_max,
+            reached_rated: true,
+        };
     }
 
     // 短行程。从 d_acc(v_p) + d_dec(v_p) = dist 解出峰值速度。
@@ -137,7 +163,11 @@ pub fn traverse_time(dist: f64, p: MotionProfile) -> Traverse {
     let v_p = ((-bb + disc.sqrt()) / (2.0 * aa)) as f32;
     let (t1, _) = ramp(v_p as f64, p.a_acc, p.j_acc);
     let (t2, _) = ramp(v_p as f64, p.a_dec, p.j_dec);
-    Traverse { time: t1 + t2, peak_speed: v_p, reached_rated: false }
+    Traverse {
+        time: t1 + t2,
+        peak_speed: v_p,
+        reached_rated: false,
+    }
 }
 
 /// 从速度 `v` 减速到停所需的距离，米。
@@ -182,7 +212,16 @@ fn leg_phases(dist: f64, p: MotionProfile) -> LegPhases {
     let (t_dec, d_dec) = ramp(v, p.a_dec, p.j_dec);
     let d_cruise = (dist - d_acc - d_dec).max(0.0);
     let t_cruise = if v > 0.0 { d_cruise / v } else { 0.0 };
-    LegPhases { total_t: tr.time, v_peak: v, t_acc, d_acc, t_cruise, d_cruise, t_dec, d_dec }
+    LegPhases {
+        total_t: tr.time,
+        v_peak: v,
+        t_acc,
+        d_acc,
+        t_cruise,
+        d_cruise,
+        t_dec,
+        d_dec,
+    }
 }
 
 /// 走 `dist` 米时，时刻 `t` 已经走过的距离，以及当时的速度。
@@ -202,7 +241,11 @@ pub fn state_at(dist: f64, p: MotionProfile, t: f64) -> (f64, f64) {
     } else if t < l.t_acc + l.t_cruise {
         (l.d_acc + l.v_peak * (t - l.t_acc), l.v_peak)
     } else {
-        let f = if l.t_dec > 0.0 { (t - l.t_acc - l.t_cruise) / l.t_dec } else { 1.0 };
+        let f = if l.t_dec > 0.0 {
+            (t - l.t_acc - l.t_cruise) / l.t_dec
+        } else {
+            1.0
+        };
         let f = f.clamp(0.0, 1.0);
         (dist - l.d_dec * (1.0 - f) * (1.0 - f), l.v_peak * (1.0 - f))
     }
@@ -218,12 +261,20 @@ pub fn time_at_distance(dist: f64, p: MotionProfile, d: f64) -> f64 {
         return l.total_t;
     }
     if d <= l.d_acc {
-        let f = if l.d_acc > 0.0 { (d / l.d_acc).sqrt() } else { 1.0 };
+        let f = if l.d_acc > 0.0 {
+            (d / l.d_acc).sqrt()
+        } else {
+            1.0
+        };
         l.t_acc * f
     } else if d <= l.d_acc + l.d_cruise {
         l.t_acc + (d - l.d_acc) / l.v_peak.max(1e-9)
     } else {
-        let f = if l.d_dec > 0.0 { 1.0 - ((dist - d) / l.d_dec).sqrt() } else { 1.0 };
+        let f = if l.d_dec > 0.0 {
+            1.0 - ((dist - d) / l.d_dec).sqrt()
+        } else {
+            1.0
+        };
         l.t_acc + l.t_cruise + f.clamp(0.0, 1.0) * l.t_dec
     }
 }
@@ -349,7 +400,11 @@ mod tests {
 
         // 峰值速度解二次方程，doc 里给的是 1.262
         let tr = traverse_time(3.0, p);
-        assert!((tr.peak_speed - 1.262).abs() < 0.002, "峰值应为 1.262，实际 {}", tr.peak_speed);
+        assert!(
+            (tr.peak_speed - 1.262).abs() < 0.002,
+            "峰值应为 1.262，实际 {}",
+            tr.peak_speed
+        );
         assert!(!tr.reached_rated, "单层跑不满额定");
     }
 
@@ -381,8 +436,14 @@ mod tests {
             let p = MotionProfile::preset(name).unwrap();
             let a = traverse_time(3.0, p).time;
             let b = traverse_time(90.0, p).time;
-            assert!((a - one_floor).abs() < 0.01, "{name} 单层应为 {one_floor}，实际 {a}");
-            assert!((b - thirty).abs() < 0.01, "{name} 跑 30 层应为 {thirty}，实际 {b}");
+            assert!(
+                (a - one_floor).abs() < 0.01,
+                "{name} 单层应为 {one_floor}，实际 {a}"
+            );
+            assert!(
+                (b - thirty).abs() < 0.01,
+                "{name} 跑 30 层应为 {thirty}，实际 {b}"
+            );
         }
     }
 
@@ -392,16 +453,28 @@ mod tests {
         let slow = traverse_time(3.0, MotionProfile::preset("std_1_75").unwrap()).time;
         for name in ["high_2_5", "high_3_0"] {
             // 换用更高额定但保持同一套 a 与 j，峰值速度只由行程决定
-            let p = MotionProfile { v_max: MotionProfile::preset(name).unwrap().v_max, ..MotionProfile::default() };
-            assert!((traverse_time(3.0, p).time - slow).abs() < 1e-9, "{name} 单层应当与 std_1_75 相同");
+            let p = MotionProfile {
+                v_max: MotionProfile::preset(name).unwrap().v_max,
+                ..MotionProfile::default()
+            };
+            assert!(
+                (traverse_time(3.0, p).time - slow).abs() < 1e-9,
+                "{name} 单层应当与 std_1_75 相同"
+            );
         }
     }
 
     /// 上下不对称时下行会慢下来。`docs/MODEL.md` 第 3.5 节给的是 39.93 对 48.30。
     #[test]
     fn asymmetric_up_down_differs() {
-        let up = MotionProfile { v_max: 2.5, ..MotionProfile::default() };
-        let down = MotionProfile { v_max: 2.0, ..MotionProfile::default() };
+        let up = MotionProfile {
+            v_max: 2.5,
+            ..MotionProfile::default()
+        };
+        let down = MotionProfile {
+            v_max: 2.0,
+            ..MotionProfile::default()
+        };
         let a = traverse_time(90.0, up).time;
         let b = traverse_time(90.0, down).time;
         assert!((a - 39.93).abs() < 0.01, "上行应为 39.93，实际 {a}");
@@ -412,10 +485,19 @@ mod tests {
     #[test]
     fn floor_height_sensitivity() {
         let p = MotionProfile::default();
-        let cases = [(2.8, 4.63f64), (2.9, 4.69), (3.0, 4.75), (3.1, 4.82), (3.3, 4.94)];
+        let cases = [
+            (2.8, 4.63f64),
+            (2.9, 4.69),
+            (3.0, 4.75),
+            (3.1, 4.82),
+            (3.3, 4.94),
+        ];
         for (h, want) in cases {
             let got = traverse_time(h, p).time;
-            assert!((got - want).abs() < 0.01, "层高 {h} 应为 {want}，实际 {got}");
+            assert!(
+                (got - want).abs() < 0.01,
+                "层高 {h} 应为 {want}，实际 {got}"
+            );
         }
     }
 
@@ -470,9 +552,18 @@ mod tests {
     /// 曲线没夹过就传进来时，相位分解不能算出无穷大。
     #[test]
     fn unsanitized_profile_stays_finite() {
-        let p = MotionProfile { v_max: 1.75, a_acc: 0.0, a_dec: 0.0, j_acc: 0.0, j_dec: 0.0 };
+        let p = MotionProfile {
+            v_max: 1.75,
+            a_acc: 0.0,
+            a_dec: 0.0,
+            j_acc: 0.0,
+            j_dec: 0.0,
+        };
         let (d, v) = state_at(30.0, p, 2.0);
-        assert!(d.is_finite() && v.is_finite(), "未夹取的曲线把结果算成了 {d} / {v}");
+        assert!(
+            d.is_finite() && v.is_finite(),
+            "未夹取的曲线把结果算成了 {d} / {v}"
+        );
         assert!(time_at_distance(30.0, p, 10.0).is_finite());
     }
 }
